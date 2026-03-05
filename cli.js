@@ -20,10 +20,44 @@ const rtdbUtils = (() => {
 
   const setUrl = (url = "") => (rtdbUrl = url);
 
+  function parseEnvPlaceholder(value) {
+    if (typeof value !== "string") return null;
+    const s = value.trim();
+
+    let m = s.match(/^%([A-Za-z_][A-Za-z0-9_]*)%$/); // CMD: %VAR%
+    if (m) return m[1];
+
+    m = s.match(/^\$env:([A-Za-z_][A-Za-z0-9_]*)$/i); // PS: $env:VAR
+    if (m) return m[1];
+
+    m = s.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/); // bash: ${VAR}
+    if (m) return m[1];
+
+    m = s.match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/); // bash: $VAR
+    if (m) return m[1];
+
+    return null;
+  }
+
+  function resolveRtdbUrlFromObjVar(rtdbUrl, objVar) {
+    const envName = parseEnvPlaceholder(rtdbUrl);
+    if (!envName) return rtdbUrl;
+
+    if (!objVar || typeof objVar !== "object" || Array.isArray(objVar)) return rtdbUrl;
+    if (!Object.prototype.hasOwnProperty.call(objVar, envName)) return rtdbUrl;
+
+    const resolved = objVar[envName];
+    if (typeof resolved !== "string" || resolved.trim() === "") return rtdbUrl;
+
+    return resolved.trim();
+  }
+
+  // --- pushTo ---
   const pushTo = async (objVar = {}) => {
-    // Nếu objVar có key, thì sẽ dùng Patch để lưu vào realtime database
     try {
-      if (!rtdbUrl) {
+      const finalUrl = resolveRtdbUrlFromObjVar(rtdbUrl, objVar);
+
+      if (!finalUrl) {
         console.error(`[rtdb] Missing url. Provide --eUrl=https://...`);
         return false;
       }
@@ -31,10 +65,11 @@ const rtdbUtils = (() => {
         console.error(`[rtdb] pushTo expects an object key=value`);
         return false;
       }
+
       const keys = Object.keys(objVar);
       if (keys.length === 0) return true;
 
-      const res = await fetch(rtdbUrl, {
+      const res = await fetch(finalUrl, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(objVar),
@@ -42,7 +77,7 @@ const rtdbUtils = (() => {
 
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        console.error(`[rtdb] PATCH failed: HTTP ${res.status} ${res.statusText} ${text ? `- ${text}` : ""}`);
+        console.error(`[rtdb] PATCH failed: HTTP ${res.status} ${res.statusText}${text ? ` - ${text}` : ""}`);
         return false;
       }
       return true;
@@ -294,9 +329,9 @@ function printHelp() {
       "  --pull              pull variables from --eUrl and write back to -e <path> .env file (requires -e exists, and file exists)",
       "  --shell[=<shell>]   run the `command` through a shell (cross-env-shell style).",
       "                      tip: pass the whole command as ONE quoted string after `--` to preserve quoting/operators.",
-      "                      example (cmd.exe): dotenvrtdb -e .env --shell -- \"echo %API_BASE% && node app.js\"",
+      '                      example (cmd.exe): dotenvrtdb -e .env --shell -- "echo %API_BASE% && node app.js"',
       "                      example (bash):    dotenvrtdb -e .env --shell -- 'echo \"$API_BASE\" && node app.js'",
-      "                      also supports inline env: dotenvrtdb --shell -- FOO=bar \"echo %FOO%\"",
+      '                      also supports inline env: dotenvrtdb --shell -- FOO=bar "echo %FOO%"',
       "  --writefileraw=<path>    write raw value from --var=<name> in -e <path> env file to <path>",
       "  --writefilebase64=<path> read --var=<name> from -e <path>, decode base64, then write binary to <path>",
       "  --var=<name>             env variable name used by --writefileraw/--writefilebase64",
