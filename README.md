@@ -72,13 +72,13 @@ Download environment variables from a realtime database (Firebase, custom API, e
 
 ```bash
 # Pull to default .env file
-$ dotenvrtdb --pull https://your-project.firebaseio.com/env.json
+$ dotenvrtdb --pull --eUrl=https://your-project.firebaseio.com/env.json -e .env
 
 # Pull to custom file using -e flag
-$ dotenvrtdb --pull https://your-project.firebaseio.com/env.json -e .env.production
+$ dotenvrtdb --pull --eUrl=https://your-project.firebaseio.com/env.json -e .env.production
 
 # Or specify -e flag before --pull
-$ dotenvrtdb -e .env.staging --pull https://your-project.firebaseio.com/env.json
+$ dotenvrtdb -e .env.staging --pull --eUrl=https://your-project.firebaseio.com/env.json
 ```
 
 #### Push environment variables to remote database
@@ -87,27 +87,48 @@ Upload your local `.env` file to a realtime database:
 
 ```bash
 # Push from default .env file
-$ dotenvrtdb --push https://your-project.firebaseio.com/env.json
+$ dotenvrtdb --push --eUrl=https://your-project.firebaseio.com/env.json -e .env
 
 # Push from custom file using -e flag
-$ dotenvrtdb --push https://your-project.firebaseio.com/env.json -e .env.production
+$ dotenvrtdb --push --eUrl=https://your-project.firebaseio.com/env.json -e .env.production
 
 # Or specify -e flag before --push
-$ dotenvrtdb -e .env.staging --push https://your-project.firebaseio.com/env.json
+$ dotenvrtdb -e .env.staging --push --eUrl=https://your-project.firebaseio.com/env.json
 ```
 
 #### Example workflow:
 
 ```bash
 # Pull production env from Firebase
-$ dotenvrtdb --pull https://myapp.firebaseio.com/env/prod.json -e .env.production
+$ dotenvrtdb --pull --eUrl=https://myapp.firebaseio.com/env/prod.json -e .env.production
 
 # Run your app with production env
 $ dotenvrtdb -e .env.production -- node app.js
 
 # Update local env and push back
-$ dotenvrtdb --push https://myapp.firebaseio.com/env/prod.json -e .env.production
+$ dotenvrtdb --push --eUrl=https://myapp.firebaseio.com/env/prod.json -e .env.production
 ```
+
+#### Resolve file directives inside `.env`
+
+Format directive:
+
+```env
+SERVICE_ACCOUNT_JSON=file:raw:./secrets/service-account.json
+SSL_CERT_B64=file:base64:./secrets/tls.crt
+```
+
+- `file:raw:<path>`: đọc file UTF-8 và đưa trực tiếp vào biến.
+- `file:base64:<path>`: đọc file binary và encode base64 vào biến.
+- Path tương đối được resolve từ thư mục chứa file `-e`.
+
+Chạy độc lập:
+
+```bash
+$ dotenvrtdb -e .env --resolvefilevars
+```
+
+Khi chạy `--pull`, luồng resolve này cũng được chạy trước khi ghi file `.env`.
 
 ### Custom .env files
 
@@ -305,12 +326,14 @@ Options:
   command             command to run with environment variables loaded
 
 Remote database commands:
-  --pull <url>        pull env variables from remote database URL and save to file
+  --eUrl=<url>        remote URL for pull/push
+  --pull              pull env variables from --eUrl and save to file
                       use with -e flag to specify output file (default: .env)
-                      example: dotenvrtdb --pull <url> -e .env.production
-  --push <url>        push local .env file to remote database URL
+                      example: dotenvrtdb --pull --eUrl=<url> -e .env.production
+  --push              push local .env file to --eUrl
                       use with -e flag to specify source file (default: .env)
-                      example: dotenvrtdb --push <url> -e .env.staging
+                      example: dotenvrtdb --push --eUrl=<url> -e .env.staging
+  --resolvefilevars   resolve directives file:<raw|base64>:<path> in file -e
 ```
 
 ## Use Cases
@@ -321,10 +344,10 @@ Keep your team's environment variables in sync using Firebase Realtime Database:
 
 ```bash
 # Team lead pushes the base config
-$ dotenvrtdb --push https://team-project.firebaseio.com/env/base.json
+$ dotenvrtdb --push --eUrl=https://team-project.firebaseio.com/env/base.json
 
 # Team members pull the config
-$ dotenvrtdb --pull https://team-project.firebaseio.com/env/base.json
+$ dotenvrtdb --pull --eUrl=https://team-project.firebaseio.com/env/base.json
 ```
 
 ### Multi-Environment Deployment
@@ -333,10 +356,10 @@ Manage different environments easily:
 
 ```bash
 # Pull production config
-$ dotenvrtdb --pull https://myapp.firebaseio.com/prod.json -e .env.production
+$ dotenvrtdb --pull --eUrl=https://myapp.firebaseio.com/prod.json -e .env.production
 
 # Pull staging config
-$ dotenvrtdb --pull https://myapp.firebaseio.com/staging.json -e .env.staging
+$ dotenvrtdb --pull --eUrl=https://myapp.firebaseio.com/staging.json -e .env.staging
 
 # Run with specific environment
 $ dotenvrtdb -e .env.production -- node server.js
@@ -351,7 +374,7 @@ Store secrets in Firebase and pull them during deployment:
 - name: Pull environment variables
   run: |
     npm install -g @tolaptrinhdh61-spec/dotenvrtdb
-    dotenvrtdb --pull ${{ secrets.FIREBASE_ENV_URL }} -e .env.production
+    dotenvrtdb --pull --eUrl="${{ secrets.FIREBASE_ENV_URL }}" -e .env.production
 
 - name: Deploy application
   run: dotenvrtdb -e .env.production -- npm run deploy
@@ -361,13 +384,13 @@ Store secrets in Firebase and pull them during deployment:
 
 ```bash
 # Developer pulls latest shared config
-$ dotenvrtdb --pull https://dev-db.firebaseio.com/config.json -e .env.development
+$ dotenvrtdb --pull --eUrl=https://dev-db.firebaseio.com/config.json -e .env.development
 
 # Make local changes and test
 $ dotenvrtdb -e .env.development -- npm run dev
 
 # Push updated config back (if authorized)
-$ dotenvrtdb --push https://dev-db.firebaseio.com/config.json -e .env.development
+$ dotenvrtdb --push --eUrl=https://dev-db.firebaseio.com/config.json -e .env.development
 ```
 
 ## Remote Database Format
@@ -400,7 +423,7 @@ dotenvrtdb automatically masks sensitive information in URLs when displaying con
 
 ```bash
 # Your command
-$ dotenvrtdb --pull "https://myapp.firebaseio.com/env.json?auth=AIzaSyAbc123XYZ"
+$ dotenvrtdb --pull --eUrl="https://myapp.firebaseio.com/env.json?auth=AIzaSyAbc123XYZ"
 
 # Console output (auth token is masked)
 Pulling environment variables from https://myapp.firebaseio.com/env.json?auth=******...
@@ -494,13 +517,13 @@ $ dotenvrtdb -v PORT=3000 -v HOST=localhost -- node server.js
 
 ```bash
 # Pull from Firebase with auth token
-$ dotenvrtdb --pull "https://myapp.firebaseio.com/config.json?auth=YOUR_TOKEN" -e .env
+$ dotenvrtdb --pull --eUrl="https://myapp.firebaseio.com/config.json?auth=YOUR_TOKEN" -e .env
 
 # Push to custom API endpoint
-$ dotenvrtdb --push "https://api.myapp.com/env" -e .env.production
+$ dotenvrtdb --push --eUrl="https://api.myapp.com/env" -e .env.production
 
 # Pull and immediately use
-$ dotenvrtdb --pull "https://myapp.firebaseio.com/env.json?auth=TOKEN" -e .env.temp && \
+$ dotenvrtdb --pull --eUrl="https://myapp.firebaseio.com/env.json?auth=TOKEN" -e .env.temp && \
   dotenvrtdb -e .env.temp -- node app.js
 ```
 
@@ -508,7 +531,7 @@ $ dotenvrtdb --pull "https://myapp.firebaseio.com/env.json?auth=TOKEN" -e .env.t
 
 ```bash
 # Cascade with remote sync
-$ dotenvrtdb --pull "https://firebase.com/base.json" -e .env
+$ dotenvrtdb --pull --eUrl="https://firebase.com/base.json" -e .env
 $ dotenvrtdb -e .env -c production -- node app.js
 
 # Multiple env files with priority
