@@ -35,6 +35,13 @@ function logSyncStatus(action = "sync", { status = "unknown", file = "-", varCou
   console.log(`[${safeAction}] status=${normalizedStatus} | file=${file || "-"} | vars=${Number.isFinite(varCount) ? varCount : 0}${detail}`);
 }
 
+function ensureParentDirExists(filePath = "") {
+  const target = `${filePath || ""}`.trim();
+  if (!target) return;
+  const absPath = path.resolve(target);
+  fs.mkdirSync(path.dirname(absPath), { recursive: true });
+}
+
 const rtdbUtils = (() => {
   let rtdbUrl = ``;
 
@@ -578,6 +585,7 @@ async function main() {
       if (!envVar.ok) process.exit(1);
 
       try {
+        ensureParentDirExists(outPath);
         fs.writeFileSync(outPath, envVar.value, "utf8");
       } catch (err) {
         console.error(`[writefileraw] write error: ${err && err.message ? err.message : err}`);
@@ -641,6 +649,7 @@ async function main() {
       }
 
       try {
+        ensureParentDirExists(outPath);
         fs.writeFileSync(outPath, decoded.buffer);
       } catch (err) {
         console.error(`[writefilebase64] write error: ${err && err.message ? err.message : err}`);
