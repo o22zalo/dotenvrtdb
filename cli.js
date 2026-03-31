@@ -15,6 +15,26 @@ const spawn = require("cross-spawn");
 const path = require("path");
 const fs = require("fs");
 
+function formatErrorMessage(context = "unknown", err) {
+  if (!err) return `[${context}] Unknown error`;
+  const message = err && err.message ? err.message : String(err);
+  const code = err && err.code ? ` | code=${err.code}` : "";
+  const syscall = err && err.syscall ? ` | syscall=${err.syscall}` : "";
+  const filePath = err && err.path ? ` | path=${err.path}` : "";
+  const cause =
+    err && err.cause
+      ? ` | cause=${err.cause && err.cause.message ? err.cause.message : String(err.cause)}`
+      : "";
+  return `[${context}] ${message}${code}${syscall}${filePath}${cause}`;
+}
+
+function logSyncStatus(action = "sync", { status = "unknown", file = "-", varCount = 0, message = "" } = {}) {
+  const normalizedStatus = `${status || "unknown"}`.toUpperCase();
+  const safeAction = `${action || "sync"}`.toUpperCase();
+  const detail = message ? ` | reason=${message}` : "";
+  console.log(`[${safeAction}] status=${normalizedStatus} | file=${file || "-"} | vars=${Number.isFinite(varCount) ? varCount : 0}${detail}`);
+}
+
 const rtdbUtils = (() => {
   let rtdbUrl = ``;
 
@@ -82,7 +102,7 @@ const rtdbUtils = (() => {
       }
       return true;
     } catch (err) {
-      console.error(`[rtdb] PATCH error: ${err && err.message ? err.message : err}`);
+      console.error(formatErrorMessage("rtdb PATCH error", err));
       return false;
     }
   };
@@ -93,18 +113,20 @@ const rtdbUtils = (() => {
       const p = `${envPath || ""}`.trim();
       if (!p) {
         console.error(`[rtdb] Missing -e <path> for --push`);
-        return false;
+        return { ok: false, file: p || "-", varCount: 0 };
       }
       if (!fs.existsSync(p)) {
         console.error(`[rtdb] Env file not found: ${p}`);
-        return false;
+        return { ok: false, file: p, varCount: 0 };
       }
       const content = fs.readFileSync(p, "utf8");
       const parsed = dotenv.parse(content); // {KEY:VAL}
-      return await pushTo(parsed);
+      const varCount = Object.keys(parsed || {}).length;
+      const ok = await pushTo(parsed);
+      return { ok, file: p, varCount };
     } catch (err) {
-      console.error(`[rtdb] envPathPushTo error: ${err && err.message ? err.message : err}`);
-      return false;
+      console.error(formatErrorMessage("rtdb envPathPushTo error", err));
+      return { ok: false, file: `${envPath || "-"} `.trim(), varCount: 0 };
     }
   };
 
@@ -125,7 +147,7 @@ const rtdbUtils = (() => {
       if (!data || typeof data !== "object" || Array.isArray(data)) return {};
       return data;
     } catch (err) {
-      console.error(`[rtdb] GET error: ${err && err.message ? err.message : err}`);
+      console.error(formatErrorMessage("rtdb GET error", err));
       return {};
     }
   };
@@ -199,7 +221,7 @@ const rtdbUtils = (() => {
       }
       return { ok: true, value: `${parsed[key] ?? ""}` };
     } catch (err) {
-      console.error(`[env] readEnvVarFromPath error: ${err && err.message ? err.message : err}`);
+      console.error(formatErrorMessage("env readEnvVarFromPath error", err));
       return { ok: false, value: "" };
     }
   }
@@ -226,7 +248,7 @@ const rtdbUtils = (() => {
       }
       return { ok: true, buffer };
     } catch (err) {
-      console.error(`[env] decodeBase64ToBuffer error: ${err && err.message ? err.message : err}`);
+      console.error(formatErrorMessage("env decodeBase64ToBuffer error", err));
       return { ok: false, buffer: Buffer.alloc(0) };
     }
   }
@@ -356,25 +378,26 @@ function validateCmdVariable(param) {
 }
 
 async function main() {
-  if (argv.help) {
-    printHelp();
-    process.exit();
-  }
+  try {
+    if (argv.help) {
+      printHelp();
+      process.exit();
+    }
 
-  const override = argv.o || argv.override;
+    const override = argv.o || argv.override;
 
-  // Handle quiet flag - default is true (quiet), can be disabled with --quiet=false or -q=false
-  const isQuiet = !(argv.quiet === false || argv.q === false || argv.quiet === "false" || argv.q === "false");
+    // Handle quiet flag - default is true (quiet), can be disabled with --quiet=false or -q=false
+    const isQuiet = !(argv.quiet === false || argv.q === false || argv.quiet === "false" || argv.q === "false");
 
-  if (argv.c && override) {
-    console.error("Invalid arguments. Cascading env variables conflicts with overrides.");
-    process.exit(1);
-  }
+    if (argv.c && override) {
+      console.error("Invalid arguments. Cascading env variables conflicts with overrides.");
+      process.exit(1);
+    }
 
-  // Setup RTDB URL if provided
-  if (argv.eUrl) {
-    rtdbUtils.setUrl(argv.eUrl);
-  }
+    // Setup RTDB URL if provided
+    if (argv.eUrl) {
+      rtdbUtils.setUrl(argv.eUrl);
+    }
 
   const executePush = async () => {
     /**
@@ -383,13 +406,26 @@ async function main() {
     if (!argv.push) return false;
     if (!argv.eUrl) {
       console.error(`Missing --eUrl=<url>. This is required for --push.`);
+      logSyncStatus("push", { status: "failed", file: "-", varCount: 0, message: "missing --eUrl" });
       return true; // đã "xử lý" case push nhưng lỗi => vẫn kết thúc luồng
     }
     const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
-    if (!ok) return true;
+    if (!ok) {
+      logSyncStatus("push", { status: "failed", file: envPath || "-", varCount: 0, message: "missing/invalid -e path" });
+      return true;
+    }
 
-    const okPush = await rtdbUtils.envPathPushTo(envPath);
-    if (!okPush) process.exit(1);
+    const pushResult = await rtdbUtils.envPathPushTo(envPath);
+    if (!pushResult.ok) {
+      logSyncStatus("push", {
+        status: "failed",
+        file: pushResult.file || envPath,
+        varCount: pushResult.varCount || 0,
+        message: "unable to push env vars to RTDB",
+      });
+      process.exit(1);
+    }
+    logSyncStatus("push", { status: "success", file: pushResult.file || envPath, varCount: pushResult.varCount || 0 });
     return true;
   };
 
@@ -400,21 +436,28 @@ async function main() {
     if (!argv.pull) return false;
     if (!argv.eUrl) {
       console.error(`Missing --eUrl=<url>. This is required for --pull.`);
+      logSyncStatus("pull", { status: "failed", file: "-", varCount: 0, message: "missing --eUrl" });
       return true; // đã "xử lý" case pull nhưng lỗi => vẫn kết thúc luồng
     }
     const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
-    if (!ok) return true;
+    if (!ok) {
+      logSyncStatus("pull", { status: "failed", file: envPath || "-", varCount: 0, message: "missing/invalid -e path" });
+      return true;
+    }
 
     const objVar = {
       ...rtdbUtils.getDefaultRtdbEnv(),
       ...(await rtdbUtils.pullFrom()),
     };
+    const pullVarCount = Object.keys(objVar || {}).length;
 
     try {
       const out = rtdbUtils.serializeEnv(objVar);
       fs.writeFileSync(envPath, out, "utf8");
+      logSyncStatus("pull", { status: "success", file: envPath, varCount: pullVarCount });
     } catch (err) {
       console.error(`[pull] write error: ${err && err.message ? err.message : err}`);
+      logSyncStatus("pull", { status: "failed", file: envPath, varCount: pullVarCount, message: "write file failed" });
       process.exit(1);
     }
     return true;
@@ -490,42 +533,42 @@ async function main() {
     return true;
   };
 
-  const didPush = await executePush();
-  const didPull = await executePull();
-  const didWriteFileRaw = await executeWriteFileRaw();
-  const didWriteFileBase64 = await executeWriteFileBase64();
-  if (didPush === true || didPull === true || didWriteFileRaw === true || didWriteFileBase64 === true) {
-    // Push/Pull/WriteFile là mode riêng, chạy xong thoát
-    process.exit(0);
-  }
-
-  let paths = [];
-  if (argv.e) {
-    if (typeof argv.e === "string") {
-      paths.push(argv.e);
-    } else {
-      paths.push(...argv.e);
+    const didPush = await executePush();
+    const didPull = await executePull();
+    const didWriteFileRaw = await executeWriteFileRaw();
+    const didWriteFileBase64 = await executeWriteFileBase64();
+    if (didPush === true || didPull === true || didWriteFileRaw === true || didWriteFileBase64 === true) {
+      // Push/Pull/WriteFile là mode riêng, chạy xong thoát
+      process.exit(0);
     }
-  } else {
-    paths.push(".env");
-  }
 
-  if (argv.c) {
-    paths = paths.reduce(
-      (accumulator, p) =>
-        accumulator.concat(typeof argv.c === "string" ? [`${p}.${argv.c}.local`, `${p}.local`, `${p}.${argv.c}`, p] : [`${p}.local`, p]),
-      [],
-    );
-  }
-
-  const variables = [];
-  if (argv.v) {
-    if (typeof argv.v === "string") {
-      variables.push(validateCmdVariable(argv.v));
+    let paths = [];
+    if (argv.e) {
+      if (typeof argv.e === "string") {
+        paths.push(argv.e);
+      } else {
+        paths.push(...argv.e);
+      }
     } else {
-      variables.push(...argv.v.map(validateCmdVariable));
+      paths.push(".env");
     }
-  }
+
+    if (argv.c) {
+      paths = paths.reduce(
+        (accumulator, p) =>
+          accumulator.concat(typeof argv.c === "string" ? [`${p}.${argv.c}.local`, `${p}.local`, `${p}.${argv.c}`, p] : [`${p}.local`, p]),
+        [],
+      );
+    }
+
+    const variables = [];
+    if (argv.v) {
+      if (typeof argv.v === "string") {
+        variables.push(validateCmdVariable(argv.v));
+      } else {
+        variables.push(...argv.v.map(validateCmdVariable));
+      }
+    }
 
   const parseUrlToArgV = async () => {
     /**
@@ -553,42 +596,52 @@ async function main() {
     }
   };
 
-  await parseUrlToArgV();
+    await parseUrlToArgV();
 
   // Merge default env với variables (variables sẽ override default)
-  const defaultEnv = rtdbUtils.getDefaultRtdbEnv() || {};
-  const parsedVariables = {
-    ...defaultEnv,
-    ...Object.fromEntries(variables),
-  };
+    const defaultEnv = rtdbUtils.getDefaultRtdbEnv() || {};
+    const parsedVariables = {
+      ...defaultEnv,
+      ...Object.fromEntries(variables),
+    };
 
-  if (argv.debug) {
-    console.log(paths);
-    console.log(parsedVariables);
-    process.exit();
-  }
+    if (argv.debug) {
+      console.log(paths);
+      console.log(parsedVariables);
+      process.exit();
+    }
 
-  paths.forEach(function (env) {
-    dotenv.config({ path: path.resolve(env), override, quiet: isQuiet });
-  });
+    paths.forEach(function (env) {
+      try {
+        dotenv.config({ path: path.resolve(env), override, quiet: isQuiet });
+      } catch (err) {
+        console.error(formatErrorMessage(`dotenv config failed for ${env}`, err));
+        process.exit(1);
+      }
+    });
 
   // Expand when all path configs are loaded
-  if (argv.expand !== false) {
-    dotenvExpand({
-      parsed: process.env,
-    });
-  }
-
-  Object.assign(process.env, parsedVariables);
-
-  if (argv.p) {
-    let value = process.env[argv.p];
-    if (typeof value === "string") {
-      value = `${value}`;
+    if (argv.expand !== false) {
+      try {
+        dotenvExpand({
+          parsed: process.env,
+        });
+      } catch (err) {
+        console.error(formatErrorMessage("dotenv expand failed", err));
+        process.exit(1);
+      }
     }
-    console.log(value != null ? value : "");
-    process.exit();
-  }
+
+    Object.assign(process.env, parsedVariables);
+
+    if (argv.p) {
+      let value = process.env[argv.p];
+      if (typeof value === "string") {
+        value = `${value}`;
+      }
+      console.log(value != null ? value : "");
+      process.exit();
+    }
 
   // cross-env-shell style: allow `KEY=VALUE` at the beginning of the command section (after `--`)
   function parseLeadingEnvAssignments(args = []) {
@@ -608,59 +661,68 @@ async function main() {
     return { env, rest: args.slice(i) };
   }
 
-  const shellOptRaw = argv.shell;
-  let shellOpt = shellOptRaw;
-  if (typeof shellOptRaw === "string") {
-    const t = shellOptRaw.trim().toLowerCase();
-    if (t === "true" || t === "1" || t === "yes") shellOpt = true;
-    else if (t === "false" || t === "0" || t === "no") shellOpt = false;
-    else shellOpt = shellOptRaw.trim();
-  }
+    const shellOptRaw = argv.shell;
+    let shellOpt = shellOptRaw;
+    if (typeof shellOptRaw === "string") {
+      const t = shellOptRaw.trim().toLowerCase();
+      if (t === "true" || t === "1" || t === "yes") shellOpt = true;
+      else if (t === "false" || t === "0" || t === "no") shellOpt = false;
+      else shellOpt = shellOptRaw.trim();
+    }
 
-  const runInShell = shellOpt === true || (typeof shellOpt === "string" && shellOpt !== "");
-  const { env: inlineEnv, rest: cmdArgs } = runInShell ? parseLeadingEnvAssignments(argv._) : { env: {}, rest: argv._ };
+    const runInShell = shellOpt === true || (typeof shellOpt === "string" && shellOpt !== "");
+    const { env: inlineEnv, rest: cmdArgs } = runInShell ? parseLeadingEnvAssignments(argv._) : { env: {}, rest: argv._ };
 
-  if (cmdArgs.length === 0) {
-    printHelp();
-    process.exit(1);
-  }
+    if (cmdArgs.length === 0) {
+      printHelp();
+      process.exit(1);
+    }
 
-  const childEnv = Object.keys(inlineEnv).length ? Object.assign({}, process.env, inlineEnv) : process.env;
+    const childEnv = Object.keys(inlineEnv).length ? Object.assign({}, process.env, inlineEnv) : process.env;
 
-  const spawnOpts = {
-    stdio: "inherit",
-    env: childEnv,
-  };
+    const spawnOpts = {
+      stdio: "inherit",
+      env: childEnv,
+    };
 
   // If --shell is provided:
   // - boolean true => use platform default shell
   // - string => pass through to node spawn `shell` option (advanced)
-  let child;
-  if (runInShell) {
-    const shellCommand = cmdArgs.length === 1 ? cmdArgs[0] : cmdArgs.join(" ");
-    const shellVal = typeof shellOpt === "string" ? shellOpt : true;
-    child = spawn(shellCommand, [], Object.assign({}, spawnOpts, { shell: shellVal }));
-  } else {
-    const command = cmdArgs[0];
-    child = spawn(command, cmdArgs.slice(1), spawnOpts);
-  }
-
-  child.on("exit", function (exitCode, signal) {
-    if (typeof exitCode === "number") {
-      process.exit(exitCode);
+    let child;
+    if (runInShell) {
+      const shellCommand = cmdArgs.length === 1 ? cmdArgs[0] : cmdArgs.join(" ");
+      const shellVal = typeof shellOpt === "string" ? shellOpt : true;
+      child = spawn(shellCommand, [], Object.assign({}, spawnOpts, { shell: shellVal }));
     } else {
-      process.kill(process.pid, signal);
+      const command = cmdArgs[0];
+      child = spawn(command, cmdArgs.slice(1), spawnOpts);
     }
-  });
 
-  for (const signal of ["SIGINT", "SIGTERM", "SIGPIPE", "SIGHUP", "SIGBREAK", "SIGWINCH", "SIGUSR1", "SIGUSR2"]) {
-    process.on(signal, function () {
-      child.kill(signal);
+    child.on("error", function (err) {
+      console.error(formatErrorMessage("spawn process error", err));
+      process.exit(1);
     });
+
+    child.on("exit", function (exitCode, signal) {
+      if (typeof exitCode === "number") {
+        process.exit(exitCode);
+      } else {
+        process.kill(process.pid, signal);
+      }
+    });
+
+    for (const signal of ["SIGINT", "SIGTERM", "SIGPIPE", "SIGHUP", "SIGBREAK", "SIGWINCH", "SIGUSR1", "SIGUSR2"]) {
+      process.on(signal, function () {
+        child.kill(signal);
+      });
+    }
+  } catch (err) {
+    console.error(formatErrorMessage("main error", err));
+    process.exit(1);
   }
 }
 
 main().catch((err) => {
-  console.error(err && err.message ? err.message : err);
+  console.error(formatErrorMessage("fatal error", err));
   process.exit(1);
 });
