@@ -9,6 +9,7 @@
 - Inject biến trực tiếp từ command line (`-v KEY=VALUE`).
 - In giá trị biến (`-p VAR`).
 - Đồng bộ key/value với HTTP endpoint kiểu Realtime DB qua `--pull` / `--push` dùng `fetch`.
+- Resolve directive file trong `.env` theo format `file:raw:<path>` hoặc `file:base64:<path>` bằng `--resolvefilevars`.
 - Trích xuất một biến trong `.env` và ghi ra file raw hoặc decode base64 rồi ghi file nhị phân.
 
 Đối tượng sử dụng chính: developer/DevOps muốn chuẩn hóa runtime env cross-platform (đặc biệt có nhắc đến Windows), đồng thời có nhu cầu sync env với endpoint từ xa.
@@ -23,7 +24,7 @@
 - Parser CLI dùng `minimist`.
 - Nạp `.env` dùng `dotenv`, mở rộng biến dùng `dotenv-expand`.
 - Chạy command con dùng `cross-spawn`.
-- Có các mode đặc biệt: `--push`, `--pull`, `--writefileraw`, `--writefilebase64`.
+- Có các mode đặc biệt: `--push`, `--pull`, `--resolvefilevars`, `--writefileraw`, `--writefilebase64`.
 - Có rewrite tương thích ngược `-eUrl` -> `--eUrl` trước khi parse args.
 
 ### Suy luận hợp lý (độ tin cậy cao)
@@ -95,6 +96,7 @@ dotenvrtdb [flags] [-- command args...]
 - `--eUrl=<url>`: URL endpoint đọc/ghi key-value JSON.
 - `--pull`: GET từ `--eUrl`, merge thêm biến mặc định timestamp, rồi ghi đè file `-e`.
 - `--push`: đọc file `-e`, parse `.env`, PATCH JSON lên `--eUrl`.
+- `--resolvefilevars`: đọc file env tại `-e`, tìm directive `file:raw|base64:path`, thay bằng nội dung file.
 
 > Legacy-compatible:
 - `-eUrl=...` hoặc `-eUrl ...` được normalize thành `--eUrl`.
@@ -105,6 +107,8 @@ dotenvrtdb [flags] [-- command args...]
   đọc biến từ file env và ghi raw text ra file.
 - `--writefilebase64=<outputPath>` + `--var=<name>` + `-e <path>`:
   đọc biến base64 từ file env, decode, ghi binary ra file.
+- `--resolvefilevars` + `-e <path>`:
+  resolve các biến có directive `file:...` mà không cần `--pull`.
 
 ### 5) Chạy command con
 
@@ -134,7 +138,7 @@ dotenvrtdb [flags] [-- command args...]
 
 1. User chạy `dotenvrtdb` với flags + optional command.
 2. CLI normalize legacy args (`-eUrl`), parse toàn bộ args.
-3. Nếu có mode độc lập (`--push/--pull/--writefile*`) thì xử lý mode tương ứng và thoát.
+3. Nếu có mode độc lập (`--push/--pull/--resolvefilevars/--writefile*`) thì xử lý mode tương ứng và thoát.
 4. Nếu không:
    - Xác định danh sách file env từ `-e` hoặc mặc định `.env`, có thể expand theo `-c`.
    - Nạp env file bằng `dotenv.config(...)`.
@@ -165,6 +169,10 @@ flowchart TD
     L2 --> L3[Merge default vars]
     L3 --> L4[Serialize -> ghi file .env]
     L4 --> L5[Exit]
+
+    C -->|--resolvefilevars| R1[Validate -e]
+    R1 --> R2[Parse .env, resolve file: directives]
+    R2 --> R3[Write .env và Exit]
 
     C -->|--writefile*| W1[Validate -e, --var, output path]
     W1 --> W2[Đọc biến từ .env]
@@ -226,11 +234,26 @@ flowchart TD
 - **Xử lý**:
   1) GET JSON.
   2) Merge thêm biến mặc định `DOTENVRTDB_NOW_YYYYDDMMHH`.
-  3) Serialize object thành format dòng `KEY=VALUE` (sort key).
-  4) Ghi file `-e`.
+  3) Resolve directive `file:<raw|base64>:<path>` (nếu có) trước khi ghi.
+  4) Serialize object thành format dòng `KEY=VALUE` (sort key).
+  5) Ghi file `-e`.
 - **External interaction**: network GET + filesystem write.
 - **Output**: file env được cập nhật.
 - **Error path**: lỗi ghi file/network => `stderr`, thường exit 1.
+
+## Use case E: `--resolvefilevars`
+
+- **Mục đích**: chạy riêng luồng resolve `file:...` trong file env, không cần pull.
+- **Input**: `--resolvefilevars -e path`.
+- **Validation**:
+  - Phải có `-e` và file tồn tại.
+- **Xử lý**:
+  1) Parse file `.env`.
+  2) Với value match `file:raw:<path>`: đọc UTF-8 từ file.
+  3) Với value match `file:base64:<path>`: đọc binary và encode base64.
+  4) Nếu file không tồn tại: giữ nguyên value gốc, ghi warning.
+  5) Ghi ngược lại `.env`.
+- **Output**: file `.env` được cập nhật tại chỗ.
 
 ## Use case D: `--writefileraw` / `--writefilebase64`
 
@@ -258,6 +281,7 @@ flowchart TD
 | Standard run (`dotenvrtdb ... -- cmd`) | flags `-e/-c/-v`, env system, optional remote via `--eUrl`, positional command | key/value env + argv list | stdout/stderr của child process | spawn subprocess, signal forwarding | validate fail -> stderr + exit 1 |
 | `--push` | `-e` file + `--eUrl` | `.env` text -> object JSON | không có structured output | HTTP PATCH | `[rtdb] ...` messages, có thể exit 1 |
 | `--pull` | `--eUrl` + `-e` | remote JSON object | file `.env` text | HTTP GET + write file | `[rtdb]/[pull] ...`, có thể exit 1 |
+| `--resolvefilevars` | `-e` | `.env` text có directive `file:...` | file `.env` text đã resolve | read file + write file | warning khi thiếu file, exit 1 khi lỗi IO |
 | `--writefileraw` | `-e` + `--var` + output path | string variable | file text utf8 | write file | `[env]/[writefileraw] ...`, exit 1 khi lỗi nghiêm trọng |
 | `--writefilebase64` | `-e` + `--var` + output path | base64 string | file binary | decode + write file | invalid base64 -> stderr + exit 1 |
 | `-p VAR` | process.env sau merge | var name string | print value/plain line | none | in chuỗi rỗng nếu không tồn tại |
@@ -356,13 +380,18 @@ Tác động dataflow:
 
 3. `dotenvrtdb -e .env --pull --eUrl=https://example.com/env.json`
    - Input: URL + file đích.
-   - Internal flow: GET JSON -> merge timestamp var -> serialize sorted -> ghi `.env`.
+   - Internal flow: GET JSON -> merge timestamp var -> resolve `file:...` -> serialize sorted -> ghi `.env`.
    - Output: file `.env` mới.
 
 4. `dotenvrtdb -e .env --writefilebase64=cert.p12 --var=CERT_B64`
    - Input: key base64 trong `.env`.
    - Internal flow: read key -> strict decode -> write binary file.
    - Output: `cert.p12`.
+
+5. `dotenvrtdb -e .env --resolvefilevars`
+   - Input: file `.env` có directive `file:...`.
+   - Internal flow: parse env -> đọc file theo directive -> cập nhật value -> ghi ngược `.env`.
+   - Output: `.env` đã hydrate value từ file.
 
 ---
 
@@ -387,7 +416,8 @@ sequenceDiagram
     H-->>R: JSON object
     R-->>C: objVar
     C->>R: getDefaultRtdbEnv()
-    C->>R: serializeEnv(default + objVar)
+    C->>R: resolveEnvFileDirectives(default + objVar)
+    C->>R: serializeEnv(objVarResolved)
     C->>F: writeFileSync(envPath, serialized)
     C-->>U: exit 0 (nếu không lỗi)
 ```

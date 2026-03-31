@@ -231,6 +231,75 @@ const rtdbUtils = (() => {
     }
   }
 
+  function parseFileValueDirective(value) {
+    if (typeof value !== "string") return null;
+    const s = value.trim();
+    // Format đề xuất: file:<raw|base64>:<path>
+    // Ví dụ:
+    //   CERT_KEY=file:raw:./secrets/key.pem
+    //   GOOGLE_CREDS=file:base64:./secrets/creds.json
+    const m = s.match(/^file:(raw|base64):(.+)$/i);
+    if (!m) return null;
+
+    const mode = `${m[1] || ""}`.toLowerCase();
+    const filePath = `${m[2] || ""}`.trim();
+
+    console.log({ mode, filePath });
+
+    if (!filePath) return null;
+    return { mode, filePath };
+  }
+
+  function resolveEnvFileDirectives(objVar = {}, options = {}) {
+    const baseDir = `${options.baseDir || process.cwd()}`.trim() || process.cwd();
+    const shouldLog = options.log !== false;
+    const out = {};
+    let replacedCount = 0;
+    let skippedCount = 0;
+
+    for (const [k, v] of Object.entries(objVar || {})) {
+      const directive = parseFileValueDirective(v);
+      if (!directive) {
+        out[k] = v;
+        continue;
+      }
+
+      const fullPath = path.resolve(baseDir, directive.filePath);
+      if (!fs.existsSync(fullPath)) {
+        skippedCount += 1;
+        out[k] = v;
+        if (shouldLog) {
+          console.warn(`[env-file] Skip ${k}: file not found at ${fullPath}`);
+        }
+        continue;
+      }
+
+      try {
+        if (directive.mode === "raw") {
+          out[k] = fs.readFileSync(fullPath, "utf8");
+        } else if (directive.mode === "base64") {
+          out[k] = fs.readFileSync(fullPath).toString("base64");
+        } else {
+          out[k] = v;
+          skippedCount += 1;
+          if (shouldLog) {
+            console.warn(`[env-file] Skip ${k}: unknown mode '${directive.mode}'`);
+          }
+          continue;
+        }
+        replacedCount += 1;
+      } catch (err) {
+        skippedCount += 1;
+        out[k] = v;
+        if (shouldLog) {
+          console.warn(`[env-file] Skip ${k}: read error ${err && err.message ? err.message : err}`);
+        }
+      }
+    }
+
+    return { objVar: out, replacedCount, skippedCount };
+  }
+
   // ✅ Backward-compat: support legacy -eUrl (old systems) by rewriting argv -> --eUrl
   function normalizeLegacyArgs(rawArgv) {
     const out = [];
@@ -304,6 +373,8 @@ const rtdbUtils = (() => {
     serializeEnv,
     readEnvVarFromPath,
     decodeBase64ToBuffer,
+    parseFileValueDirective,
+    resolveEnvFileDirectives,
     ensureEnvPathProvidedAndExists,
     normalizeLegacyArgs,
     getVietnamDateTime,
@@ -334,6 +405,9 @@ function printHelp() {
       '                      also supports inline env: dotenvrtdb --shell -- FOO=bar "echo %FOO%"',
       "  --writefileraw=<path>    write raw value from --var=<name> in -e <path> env file to <path>",
       "  --writefilebase64=<path> read --var=<name> from -e <path>, decode base64, then write binary to <path>",
+      "  --resolvefilevars        scan -e <path> and resolve file:<raw|base64>:<path> directives into env values",
+      "                          raw: read UTF-8 file content, base64: read binary and encode to base64",
+      "                          relative path is resolved from folder containing -e file",
       "  --var=<name>             env variable name used by --writefileraw/--writefilebase64",
       "  -v <name>=<value>   put variable <name> into environment using value <value>",
       "  -v <name>=<value>   multiple -v flags are allowed",
@@ -386,6 +460,7 @@ async function main() {
       return true; // đã "xử lý" case push nhưng lỗi => vẫn kết thúc luồng
     }
     const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
+
     if (!ok) return true;
 
     const okPush = await rtdbUtils.envPathPushTo(envPath);
@@ -411,10 +486,35 @@ async function main() {
     };
 
     try {
-      const out = rtdbUtils.serializeEnv(objVar);
+      const resolved = rtdbUtils.resolveEnvFileDirectives(objVar, { baseDir: path.dirname(envPath), log: true });
+      const out = rtdbUtils.serializeEnv(resolved.objVar);
       fs.writeFileSync(envPath, out, "utf8");
     } catch (err) {
       console.error(`[pull] write error: ${err && err.message ? err.message : err}`);
+      process.exit(1);
+    }
+    return true;
+  };
+
+  const executeResolveFileVars = async () => {
+    /**
+     * Quét file env theo -e <path>, tìm directive file:<raw|base64>:<path>,
+     * nếu file tồn tại thì thay thế giá trị var bằng nội dung file tương ứng.
+     */
+    if (!argv.resolvefilevars) return false;
+
+    const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
+    if (!ok) return true;
+
+    try {
+      const content = fs.readFileSync(envPath, "utf8");
+      const parsed = dotenv.parse(content);
+      const resolved = rtdbUtils.resolveEnvFileDirectives(parsed, { baseDir: path.dirname(envPath), log: true });
+      const out = rtdbUtils.serializeEnv(resolved.objVar);
+      fs.writeFileSync(envPath, out, "utf8");
+      console.log(`[resolvefilevars] Replaced ${resolved.replacedCount} variable(s), skipped ${resolved.skippedCount}.`);
+    } catch (err) {
+      console.error(`[resolvefilevars] error: ${err && err.message ? err.message : err}`);
       process.exit(1);
     }
     return true;
@@ -492,9 +592,10 @@ async function main() {
 
   const didPush = await executePush();
   const didPull = await executePull();
+  const didResolveFileVars = await executeResolveFileVars();
   const didWriteFileRaw = await executeWriteFileRaw();
   const didWriteFileBase64 = await executeWriteFileBase64();
-  if (didPush === true || didPull === true || didWriteFileRaw === true || didWriteFileBase64 === true) {
+  if (didPush === true || didPull === true || didResolveFileVars === true || didWriteFileRaw === true || didWriteFileBase64 === true) {
     // Push/Pull/WriteFile là mode riêng, chạy xong thoát
     process.exit(0);
   }
