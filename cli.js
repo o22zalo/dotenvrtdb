@@ -485,10 +485,29 @@ async function main() {
       logSyncStatus("pull", { status: "failed", file: "-", varCount: 0, message: "missing --eUrl" });
       return true; // đã "xử lý" case pull nhưng lỗi => vẫn kết thúc luồng
     }
-    const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
-    if (!ok) {
-      logSyncStatus("pull", { status: "failed", file: envPath || "-", varCount: 0, message: "missing/invalid -e path" });
+    let envPath = "";
+    if (argv.e) {
+      envPath = typeof argv.e === "string" ? argv.e : argv.e[0];
+    }
+    envPath = `${envPath || ""}`.trim();
+    if (!envPath) {
+      logSyncStatus("pull", { status: "failed", file: "-", varCount: 0, message: "missing -e <path>" });
       return true;
+    }
+    if (!fs.existsSync(envPath)) {
+      try {
+        const absPath = path.resolve(envPath);
+        fs.mkdirSync(path.dirname(absPath), { recursive: true });
+        fs.writeFileSync(absPath, "", "utf8");
+      } catch (err) {
+        logSyncStatus("pull", {
+          status: "failed",
+          file: envPath,
+          varCount: 0,
+          message: formatErrorMessage("pull create env file failed", err),
+        });
+        process.exit(1);
+      }
     }
 
     const objVar = {
