@@ -49,23 +49,30 @@ function pickEnv({ prefix, all, mask }) {
 }
 
 function main() {
-  const opts = parseArgs(process.argv);
-  const envObj = pickEnv(opts);
+  try {
+    const opts = parseArgs(process.argv);
+    const envObj = pickEnv(opts);
 
-  if (opts.json) {
-    console.log(JSON.stringify(envObj, null, 2));
-    return;
-  }
+    if (opts.json) {
+      console.log(JSON.stringify(envObj, null, 2));
+      return;
+    }
 
-  const keys = Object.keys(envObj);
-  if (keys.length === 0) {
-    console.log("No env matched. Try: node app.js --all OR node app.js --prefix=dotenv_");
-    return;
-  }
+    const keys = Object.keys(envObj);
+    if (keys.length === 0) {
+      console.log("No env matched. Try: node app.js --all OR node app.js --prefix=dotenv_");
+      return;
+    }
 
-  console.log(`ENV (${keys.length} vars)`);
-  for (const k of keys) {
-    console.log(`${k}=${envObj[k]}`);
+    console.log(`ENV (${keys.length} vars)`);
+    for (const k of keys) {
+      console.log(`${k}=${envObj[k]}`);
+    }
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    const code = err && err.code ? ` | code=${err.code}` : "";
+    console.error(`[test/app] Unexpected error: ${message}${code}`);
+    process.exit(1);
   }
 }
 
