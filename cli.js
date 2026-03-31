@@ -599,11 +599,16 @@ async function main() {
   };
 
     const didPush = await executePush();
+    if (didPush === true) {
+      // push là mode riêng
+      process.exit(0);
+    }
+
     const didPull = await executePull();
     const didWriteFileRaw = await executeWriteFileRaw();
     const didWriteFileBase64 = await executeWriteFileBase64();
-    if (didPush === true || didPull === true || didWriteFileRaw === true || didWriteFileBase64 === true) {
-      // Push/Pull/WriteFile là mode riêng, chạy xong thoát
+    if (didPull === true || didWriteFileRaw === true || didWriteFileBase64 === true) {
+      // pull/writefile là mode riêng; cho phép kết hợp pull + writefile trong cùng một lệnh.
       process.exit(0);
     }
 
