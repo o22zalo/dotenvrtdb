@@ -72,6 +72,49 @@ const rtdbUtils = (() => {
     return resolved.trim();
   }
 
+  function parseFileValueDirective(value = "") {
+    if (typeof value !== "string") return null;
+    const v = value.trim();
+    if (!v) return null;
+
+    if (v.startsWith("file:raw:")) {
+      const filePath = v.slice("file:raw:".length).trim();
+      if (!filePath) return null;
+      return { type: "raw", filePath };
+    }
+    if (v.startsWith("file:base64:")) {
+      const filePath = v.slice("file:base64:".length).trim();
+      if (!filePath) return null;
+      return { type: "base64", filePath };
+    }
+    return null;
+  }
+
+  function resolveEnvFileDirectives(objVar = {}, options = {}) {
+    const baseDir = options && options.baseDir ? options.baseDir : process.cwd();
+    const next = { ...objVar };
+
+    for (const [key, val] of Object.entries(objVar || {})) {
+      const directive = parseFileValueDirective(val);
+      if (!directive) continue;
+
+      const fullPath = path.isAbsolute(directive.filePath) ? directive.filePath : path.resolve(baseDir, directive.filePath);
+      if (!fs.existsSync(fullPath)) {
+        throw new Error(`[directive] File not found for key "${key}": ${fullPath}`);
+      }
+
+      if (directive.type === "raw") {
+        next[key] = fs.readFileSync(fullPath, "utf8");
+        continue;
+      }
+      if (directive.type === "base64") {
+        next[key] = fs.readFileSync(fullPath).toString("base64");
+      }
+    }
+
+    return next;
+  }
+
   // --- pushTo ---
   const pushTo = async (objVar = {}) => {
     try {
@@ -121,12 +164,13 @@ const rtdbUtils = (() => {
       }
       const content = fs.readFileSync(p, "utf8");
       const parsed = dotenv.parse(content); // {KEY:VAL}
-      const varCount = Object.keys(parsed || {}).length;
-      const ok = await pushTo(parsed);
-      return { ok, file: p, varCount };
+      const resolvedVars = resolveEnvFileDirectives(parsed, { baseDir: path.dirname(path.resolve(p)) });
+      const varCount = Object.keys(resolvedVars || {}).length;
+      const ok = await pushTo(resolvedVars);
+      return { ok, file: p, varCount, reason: ok ? "" : "RTDB PATCH failed" };
     } catch (err) {
       console.error(formatErrorMessage("rtdb envPathPushTo error", err));
-      return { ok: false, file: `${envPath || "-"} `.trim(), varCount: 0 };
+      return { ok: false, file: `${envPath || "-"} `.trim(), varCount: 0, reason: err && err.message ? err.message : String(err) };
     }
   };
 
@@ -326,6 +370,8 @@ const rtdbUtils = (() => {
     serializeEnv,
     readEnvVarFromPath,
     decodeBase64ToBuffer,
+    parseFileValueDirective,
+    resolveEnvFileDirectives,
     ensureEnvPathProvidedAndExists,
     normalizeLegacyArgs,
     getVietnamDateTime,
@@ -421,7 +467,7 @@ async function main() {
         status: "failed",
         file: pushResult.file || envPath,
         varCount: pushResult.varCount || 0,
-        message: "unable to push env vars to RTDB",
+        message: pushResult.reason || "unable to push env vars to RTDB",
       });
       process.exit(1);
     }
