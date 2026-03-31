@@ -402,7 +402,9 @@ function printHelp() {
       '                      also supports inline env: dotenvrtdb --shell -- FOO=bar "echo %FOO%"',
       "  --writefileraw=<path>    write raw value from --var=<name> in -e <path> env file to <path>",
       "  --writefilebase64=<path> read --var=<name> from -e <path>, decode base64, then write binary to <path>",
-      "  --var=<name>             env variable name used by --writefileraw/--writefilebase64",
+      "  --var=<name>             env variable name used by --writefileraw/--writefilebase64 (repeatable, mapped by order)",
+      "  --varraw=<name>          optional explicit variable for --writefileraw (repeatable, one-to-one with --writefileraw)",
+      "  --varbase64=<name>       optional explicit variable for --writefilebase64 (repeatable, one-to-one with --writefilebase64)",
       "  -v <name>=<value>   put variable <name> into environment using value <value>",
       "  -v <name>=<value>   multiple -v flags are allowed",
       "  -p <variable>       print value of <variable> to the console. If you specify this, you do not have to specify a `command`",
@@ -534,28 +536,53 @@ async function main() {
      */
     if (!argv.writefileraw) return false;
 
-    const outPath = typeof argv.writefileraw === "string" ? argv.writefileraw.trim() : "";
-    if (!outPath) {
+    const outPaths = (Array.isArray(argv.writefileraw) ? argv.writefileraw : [argv.writefileraw])
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+    if (outPaths.length === 0) {
       console.error(`Missing --writefileraw=<path>.`);
       return true;
     }
-    const varName = typeof argv.var === "string" ? argv.var.trim() : "";
-    if (!varName) {
-      console.error(`Missing --var=<name>. This is required for --writefileraw.`);
+
+    const explicitRawVars = (Array.isArray(argv.varraw || argv.varRaw) ? argv.varraw || argv.varRaw : [argv.varraw || argv.varRaw])
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+
+    const varNames = [];
+    if (explicitRawVars.length > 0) {
+      if (explicitRawVars.length !== outPaths.length) {
+        console.error(`--varraw must have the same number of entries as --writefileraw.`);
+        return true;
+      }
+      varNames.push(...explicitRawVars);
+    } else {
+      for (let i = 0; i < outPaths.length; i++) {
+        const v = varPool[varCursor++] || "";
+        varNames.push(v.trim());
+      }
+    }
+
+    if (varNames.some((v) => !v)) {
+      console.error(`Missing --var=<name>. This is required for --writefileraw (one var per output path).`);
       return true;
     }
 
     const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
     if (!ok) return true;
 
-    const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
-    if (!envVar.ok) process.exit(1);
+    for (let i = 0; i < outPaths.length; i++) {
+      const outPath = outPaths[i];
+      const varName = varNames[i];
 
-    try {
-      fs.writeFileSync(outPath, envVar.value, "utf8");
-    } catch (err) {
-      console.error(`[writefileraw] write error: ${err && err.message ? err.message : err}`);
-      process.exit(1);
+      const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
+      if (!envVar.ok) process.exit(1);
+
+      try {
+        fs.writeFileSync(outPath, envVar.value, "utf8");
+      } catch (err) {
+        console.error(`[writefileraw] write error: ${err && err.message ? err.message : err}`);
+        process.exit(1);
+      }
     }
     return true;
   };
@@ -566,37 +593,67 @@ async function main() {
      */
     if (!argv.writefilebase64) return false;
 
-    const outPath = typeof argv.writefilebase64 === "string" ? argv.writefilebase64.trim() : "";
-    if (!outPath) {
+    const outPaths = (Array.isArray(argv.writefilebase64) ? argv.writefilebase64 : [argv.writefilebase64])
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+    if (outPaths.length === 0) {
       console.error(`Missing --writefilebase64=<path>.`);
       return true;
     }
-    const varName = typeof argv.var === "string" ? argv.var.trim() : "";
-    if (!varName) {
-      console.error(`Missing --var=<name>. This is required for --writefilebase64.`);
+
+    const explicitB64Vars = (Array.isArray(argv.varbase64 || argv.varBase64) ? argv.varbase64 || argv.varBase64 : [argv.varbase64 || argv.varBase64])
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+
+    const varNames = [];
+    if (explicitB64Vars.length > 0) {
+      if (explicitB64Vars.length !== outPaths.length) {
+        console.error(`--varbase64 must have the same number of entries as --writefilebase64.`);
+        return true;
+      }
+      varNames.push(...explicitB64Vars);
+    } else {
+      for (let i = 0; i < outPaths.length; i++) {
+        const v = varPool[varCursor++] || "";
+        varNames.push(v.trim());
+      }
+    }
+
+    if (varNames.some((v) => !v)) {
+      console.error(`Missing --var=<name>. This is required for --writefilebase64 (one var per output path).`);
       return true;
     }
 
     const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
     if (!ok) return true;
 
-    const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
-    if (!envVar.ok) process.exit(1);
+    for (let i = 0; i < outPaths.length; i++) {
+      const outPath = outPaths[i];
+      const varName = varNames[i];
 
-    const decoded = rtdbUtils.decodeBase64ToBuffer(envVar.value);
-    if (!decoded.ok) {
-      console.error(`[writefilebase64] Invalid base64 content in variable: ${varName}`);
-      process.exit(1);
-    }
+      const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
+      if (!envVar.ok) process.exit(1);
 
-    try {
-      fs.writeFileSync(outPath, decoded.buffer);
-    } catch (err) {
-      console.error(`[writefilebase64] write error: ${err && err.message ? err.message : err}`);
-      process.exit(1);
+      const decoded = rtdbUtils.decodeBase64ToBuffer(envVar.value);
+      if (!decoded.ok) {
+        console.error(`[writefilebase64] Invalid base64 content in variable: ${varName}`);
+        process.exit(1);
+      }
+
+      try {
+        fs.writeFileSync(outPath, decoded.buffer);
+      } catch (err) {
+        console.error(`[writefilebase64] write error: ${err && err.message ? err.message : err}`);
+        process.exit(1);
+      }
     }
     return true;
   };
+
+    const varPool = (Array.isArray(argv.var) ? argv.var : [argv.var])
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+    let varCursor = 0;
 
     const didPush = await executePush();
     if (didPush === true) {
