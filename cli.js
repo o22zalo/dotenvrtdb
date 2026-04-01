@@ -441,6 +441,53 @@ function validateCmdVariable(param) {
   return [key, val];
 }
 
+function collectWriteVarBindings(rawArgs = []) {
+  const assignedRawVars = [];
+  const assignedBase64Vars = [];
+  const fallbackVars = [];
+  const pendingWriteTargets = [];
+
+  const readFlagValue = (arg = "", args = [], index = 0) => {
+    if (typeof arg !== "string") return { value: "", consumedNext: false };
+    const eqIndex = arg.indexOf("=");
+    if (eqIndex >= 0) return { value: arg.slice(eqIndex + 1), consumedNext: false };
+    const next = args[index + 1];
+    if (typeof next === "string" && !next.startsWith("-")) return { value: next, consumedNext: true };
+    return { value: "", consumedNext: false };
+  };
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const arg = rawArgs[i];
+    if (typeof arg !== "string") continue;
+
+    if (arg === "--writefileraw" || arg.startsWith("--writefileraw=")) {
+      const { consumedNext } = readFlagValue(arg, rawArgs, i);
+      pendingWriteTargets.push("raw");
+      if (consumedNext) i++;
+      continue;
+    }
+    if (arg === "--writefilebase64" || arg.startsWith("--writefilebase64=")) {
+      const { consumedNext } = readFlagValue(arg, rawArgs, i);
+      pendingWriteTargets.push("base64");
+      if (consumedNext) i++;
+      continue;
+    }
+    if (arg === "--var" || arg.startsWith("--var=")) {
+      const { value, consumedNext } = readFlagValue(arg, rawArgs, i);
+      const normalizedVar = `${value || ""}`.trim();
+      if (normalizedVar) {
+        const waitingType = pendingWriteTargets.shift();
+        if (waitingType === "raw") assignedRawVars.push(normalizedVar);
+        else if (waitingType === "base64") assignedBase64Vars.push(normalizedVar);
+        else fallbackVars.push(normalizedVar);
+      }
+      if (consumedNext) i++;
+    }
+  }
+
+  return { assignedRawVars, assignedBase64Vars, fallbackVars };
+}
+
 async function main() {
   try {
     const [topLevelCommand, ...topLevelArgs] = rawArgv;
@@ -582,8 +629,9 @@ async function main() {
       }
       varNames.push(...explicitRawVars);
     } else {
+      const inlineRawVars = inlineBindings.assignedRawVars || [];
       for (let i = 0; i < outPaths.length; i++) {
-        const v = varPool[varCursor++] || "";
+        const v = i < inlineRawVars.length ? inlineRawVars[i] : varPool[varCursor++] || "";
         varNames.push(v.trim());
       }
     }
@@ -640,8 +688,9 @@ async function main() {
       }
       varNames.push(...explicitB64Vars);
     } else {
+      const inlineBase64Vars = inlineBindings.assignedBase64Vars || [];
       for (let i = 0; i < outPaths.length; i++) {
-        const v = varPool[varCursor++] || "";
+        const v = i < inlineBase64Vars.length ? inlineBase64Vars[i] : varPool[varCursor++] || "";
         varNames.push(v.trim());
       }
     }
@@ -678,9 +727,8 @@ async function main() {
     return true;
   };
 
-    const varPool = (Array.isArray(argv.var) ? argv.var : [argv.var])
-      .map((v) => (typeof v === "string" ? v.trim() : ""))
-      .filter(Boolean);
+    const inlineBindings = collectWriteVarBindings(rawArgv);
+    const varPool = inlineBindings.fallbackVars;
     let varCursor = 0;
 
     const didPush = await executePush();
