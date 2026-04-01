@@ -58,7 +58,7 @@ function runDockerCommand(args = []) {
 
 function detectMissingCompose(message = "") {
   const text = `${message || ""}`.toLowerCase();
-  return text.includes("not a docker command") || text.includes("unknown command \"compose\"") || text.includes("docker-compose is not installed");
+  return text.includes("not a docker command") || text.includes('unknown command "compose"') || text.includes("docker-compose is not installed");
 }
 
 async function ensureDockerComposeAvailable() {
@@ -122,13 +122,22 @@ async function runKeepalive(rawArgv = []) {
   let timer = null;
   let running = false;
   let stopRequested = false;
+  let resolveStop = null;
 
-  const shutdown = () => {
+  const stopPromise = new Promise((resolve) => {
+    resolveStop = resolve;
+  });
+
+  const stopWithCode = (code = 0, message = "") => {
     if (stopRequested) return;
     stopRequested = true;
     if (timer) clearTimeout(timer);
-    console.log(`${label} Shutting down gracefully... Total cycles: ${cycle}`);
-    process.exit(0);
+    if (message) console.log(message);
+    if (resolveStop) resolveStop(code);
+  };
+
+  const shutdown = () => {
+    stopWithCode(0, `${label} Shutting down gracefully... Total cycles: ${cycle}`);
   };
 
   process.on("SIGINT", shutdown);
@@ -155,7 +164,8 @@ async function runKeepalive(rawArgv = []) {
     } catch (err) {
       if (err && err.code === "ENOENT") {
         console.error(`${label} docker command not found. Please install Docker.`);
-        process.exit(1);
+        stopWithCode(1);
+        return;
       }
       console.error(`${label} Warning: failed to execute docker compose logs: ${err && err.message ? err.message : String(err)}`);
     } finally {
@@ -167,8 +177,13 @@ async function runKeepalive(rawArgv = []) {
     }
   };
 
-  await runCycle();
-  return 0;
+  runCycle();
+  const exitCode = await stopPromise;
+
+  process.off("SIGINT", shutdown);
+  process.off("SIGTERM", shutdown);
+
+  return exitCode;
 }
 
 module.exports = {
