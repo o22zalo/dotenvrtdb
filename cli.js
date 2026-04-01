@@ -248,6 +248,30 @@ const rtdbUtils = (() => {
     return lines.join("\n") + (lines.length ? "\n" : "");
   }
 
+  function resolveEnvVariableReferences(obj = {}) {
+    const source = obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+    const next = { ...source };
+    let replacedCount = 0;
+    const refPattern = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
+
+    for (const [key, value] of Object.entries(source)) {
+      if (typeof value !== "string") continue;
+      const matched = value.match(refPattern);
+      if (!matched) continue;
+
+      const targetKey = matched[1];
+      if (!Object.prototype.hasOwnProperty.call(source, targetKey)) continue;
+
+      const replacement = source[targetKey];
+      if (replacement === value) continue;
+
+      next[key] = replacement;
+      replacedCount += 1;
+    }
+
+    return { objVar: next, replacedCount };
+  }
+
   function readEnvVarFromPath(envPath = "", varName = "") {
     try {
       const p = `${envPath || ""}`.trim();
@@ -377,6 +401,7 @@ const rtdbUtils = (() => {
     envPathPushTo,
     pullFrom,
     serializeEnv,
+    resolveEnvVariableReferences,
     readEnvVarFromPath,
     decodeBase64ToBuffer,
     parseFileValueDirective,
@@ -538,15 +563,19 @@ async function main() {
       }
     }
 
-    const objVar = {
+    const pulledObjVar = {
       ...rtdbUtils.getDefaultRtdbEnv(),
       ...(await rtdbUtils.pullFrom()),
     };
+    const { objVar, replacedCount } = rtdbUtils.resolveEnvVariableReferences(pulledObjVar);
     const pullVarCount = Object.keys(objVar || {}).length;
 
     try {
       const out = rtdbUtils.serializeEnv(objVar);
       fs.writeFileSync(envPath, out, "utf8");
+      if (replacedCount > 0) {
+        console.log(`[pull] Replaced ${replacedCount} variable reference value(s) in ${envPath}`);
+      }
       logSyncStatus("pull", { status: "success", file: envPath, varCount: pullVarCount });
     } catch (err) {
       console.error(`[pull] write error: ${err && err.message ? err.message : err}`);
