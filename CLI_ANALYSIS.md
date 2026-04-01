@@ -1,5 +1,7 @@
 # Phân Tích CLI `dotenvrtdb`
 
+> Cập nhật gần đây: CLI đã được refactor theo hướng backward-compatible, thêm kiến trúc subcommand và implement `runner keepalive` mà không làm thay đổi hành vi legacy.
+
 ## Tổng Quan CLI
 
 `dotenvrtdb` là một CLI Node.js dùng để:
@@ -56,20 +58,29 @@
      - Nếu không, đi theo luồng nạp env + chạy subprocess.
 
 3. **Mapping command vào runtime**
-   - CLI không có subcommand tree kiểu `commander/cobra`; thay vào đó là **flag-driven mode switching**.
-   - Command người dùng muốn chạy nằm ở phần positional `argv._` (tốt nhất sau `--`).
+   - CLI hiện có thêm lớp top-level subcommand routing tối thiểu: `runner` và `docker`.
+   - Nếu không khớp subcommand top-level, luồng legacy flag-driven vẫn chạy như cũ.
+   - Command người dùng muốn chạy theo kiểu cũ vẫn nằm ở phần positional `argv._` (tốt nhất sau `--`).
 
 ---
 
 ## Cây Lệnh CLI
 
-> Công cụ này là “single-command CLI” với nhiều chế độ theo flag.
+> Công cụ này là CLI lai: hỗ trợ **top-level subcommands** (`runner`, `docker`) đồng thời vẫn giữ đầy đủ **legacy flag modes**.
 
 ## Cú pháp tổng quát
 
 ```bash
 dotenvrtdb [flags] [-- command args...]
 ```
+
+
+### Subcommands mới
+
+- `dotenvrtdb runner <subcommand> [options]`
+  - `keepalive`: in log `docker compose` theo chu kỳ để giữ CI runner hoạt động liên tục.
+- `dotenvrtdb docker <subcommand> [options]`
+  - Namespace scaffold để mở rộng về sau (chưa có subcommand thực thi).
 
 ## Nhóm flag chính
 
@@ -147,7 +158,7 @@ dotenvrtdb [flags] [-- command args...]
 
 ---
 
-## Diagram Kiến Trúc Tổng Quan
+## Diagram Kiến Trúc Tổng Quan (đã cập nhật subcommands)
 
 ```mermaid
 flowchart TD

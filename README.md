@@ -12,7 +12,8 @@ A simple dotenv CLI for loading environment variables from `.env` files **with r
 🚀 **Push** local .env files to remote databases  
 🔒 Automatic auth token masking in console output  
 📦 Support for multiple file formats and cascading environments  
-🌐 Works with HTTP/HTTPS endpoints
+🌐 Works with HTTP/HTTPS endpoints  
+🧩 Supports extensible subcommands (`runner`, `docker`)
 
 ## Installing
 
@@ -63,6 +64,49 @@ Alternatively, if you do not need to pass arguments to the command, you can use 
 ```bash
 $ dotenvrtdb <command>
 ```
+
+
+### Subcommands
+
+`dotenvrtdb` now supports top-level subcommands while preserving all existing legacy flags.
+
+```bash
+# Existing behavior (still works)
+dotenvrtdb -e .env -- node app.js
+
+# New subcommand namespace
+dotenvrtdb runner <subcommand> [options]
+dotenvrtdb docker <subcommand> [options]
+```
+
+#### Runner: keepalive
+
+Use this to keep CI jobs active and periodically print docker compose logs:
+
+```bash
+dotenvrtdb runner keepalive
+```
+
+Options:
+
+- `--interval, -i <seconds>`: polling interval (default: `10`)
+- `--service, -s <name>`: specific service name (default: all services)
+- `--tail, -t <lines>`: number of log lines (default: `50`)
+- `--compose-file <path>`: compose file path (default: `docker-compose.yml`)
+- `--label <text>`: prefix label (default: `[keepalive]`)
+- `--help, -h`: command help
+
+Examples:
+
+```bash
+# all services
+dotenvrtdb runner keepalive --interval 10 --tail 50
+
+# specific service
+dotenvrtdb runner keepalive --interval 5 --service app --tail 20
+```
+
+`keepalive` handles `SIGINT`/`SIGTERM` for graceful shutdown and prints total cycles before exiting.
 
 ### 🔥 Remote Database Sync
 
