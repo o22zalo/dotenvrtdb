@@ -14,6 +14,8 @@
 const spawn = require("cross-spawn");
 const path = require("path");
 const fs = require("fs");
+const { runRunnerSubcommand } = require("./src/commands/runner");
+const { runDockerSubcommand } = require("./src/commands/docker");
 
 function formatErrorMessage(context = "unknown", err) {
   if (!err) return `[${context}] Unknown error`;
@@ -386,7 +388,8 @@ const rtdbUtils = (() => {
   };
 })();
 
-const argv = require("minimist")(rtdbUtils.normalizeLegacyArgs(process.argv.slice(2)));
+const rawArgv = rtdbUtils.normalizeLegacyArgs(process.argv.slice(2));
+const argv = require("minimist")(rawArgv);
 const dotenv = require("dotenv");
 const dotenvExpand = require("dotenv-expand").expand;
 
@@ -394,6 +397,8 @@ function printHelp() {
   console.log(
     [
       "Usage: dotenvrtdb [--help] [--debug] [--quiet=false] [-e <path>] [--eUrl=https://xxx] [--push|--pull] [-v <name>=<value>] [-p <variable name>] [-c [environment]] [--no-expand] [--shell[=<shell>]] [-- command]",
+      "       dotenvrtdb runner <subcommand> [options]",
+      "       dotenvrtdb docker <subcommand> [options]",
       "  --help              print help",
       "  --debug             output the files that would be processed but don't actually parse them or run the `command`",
       "  --quiet, -q         suppress debug output from dotenv (default: true)",
@@ -418,6 +423,10 @@ function printHelp() {
       "  -c [environment]    support cascading env variables from `.env`, `.env.<environment>`, `.env.local`, `.env.<environment>.local` files",
       "  --no-expand         skip variable expansion",
       "  -o, --override      override system variables. Cannot be used along with cascade (-c).",
+      "",
+      "Subcommands:",
+      "  runner keepalive     Keep CI runner alive by periodically printing docker compose logs",
+      "  docker               Docker command namespace (scaffold for future subcommands)",
       "  command             `command` is the actual command you want to run. Best practice is to precede this command with ` -- `. Everything after `--` is considered to be your command. So any flags will not be parsed by this tool but be passed to your command. If you do not do it, this tool will strip those flags",
     ].join("\n"),
   );
@@ -434,6 +443,16 @@ function validateCmdVariable(param) {
 
 async function main() {
   try {
+    const [topLevelCommand, ...topLevelArgs] = rawArgv;
+    if (topLevelCommand === "runner") {
+      const code = await runRunnerSubcommand(topLevelArgs);
+      process.exit(code);
+    }
+    if (topLevelCommand === "docker") {
+      const code = await runDockerSubcommand(topLevelArgs);
+      process.exit(code);
+    }
+
     if (argv.help) {
       printHelp();
       process.exit();
