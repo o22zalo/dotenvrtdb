@@ -823,7 +823,11 @@ async function main() {
       }
     });
 
-  // Expand when all path configs are loaded
+  // Merge -v flags & eUrl vars vào process.env TRƯỚC khi expand,
+  // để các giá trị chứa ${VAR} từ -v / --eUrl cũng được resolve đúng.
+    Object.assign(process.env, parsedVariables);
+
+  // Expand when all path configs are loaded (bao gồm cả parsedVariables vừa merge)
     if (argv.expand !== false) {
       try {
         dotenvExpand({
@@ -834,8 +838,6 @@ async function main() {
         process.exit(1);
       }
     }
-
-    Object.assign(process.env, parsedVariables);
 
     if (argv.p) {
       let value = process.env[argv.p];
