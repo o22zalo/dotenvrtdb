@@ -64,6 +64,76 @@ function runDockerCommand(args = []) {
   });
 }
 
+/**
+ * Run a docker command and capture stdout/stderr WITHOUT streaming to process stdout/stderr.
+ * Used when we need to inspect the output before (or instead of) printing it.
+ */
+function runDockerCommandCapture(args = []) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+/**
+ * Run `docker compose ps` for the given compose file (and optional service),
+ * print the container status table, then return whether any container is still running.
+ *
+ * "Running" is detected by the STATUS column starting with "Up" which is the standard
+ * docker compose ps output format across Compose v2 versions.
+ *
+ * @returns {{ anyRunning: boolean }}
+ */
+async function checkContainerStatus({ composeFile, service, label }) {
+  const psArgs = ["compose", "-f", composeFile, "ps"];
+  if (service) psArgs.push(service);
+
+  let result;
+  try {
+    result = await runDockerCommandCapture(psArgs);
+  } catch (err) {
+    // Non-fatal — just skip the check this cycle
+    console.error(`${label} Warning: could not run docker compose ps: ${err && err.message ? err.message : String(err)}`);
+    return { anyRunning: true }; // assume still running to avoid premature exit
+  }
+
+  // ── Print the captured table ──────────────────────────────────────────────
+  console.log("┄┄┄ Container Status ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+
+  if (result.code !== 0) {
+    console.error(`${label} Warning: docker compose ps exited with code ${result.code}.`);
+    return { anyRunning: true }; // cannot determine state reliably
+  }
+
+  // ── Detect running containers ─────────────────────────────────────────────
+  // docker compose ps STATUS column: "Up X minutes" | "Up X hours" etc.
+  // Exited containers show:          "Exited (N) X ago"
+  // Header line starts with "NAME"  — skip it.
+  const lines = result.stdout.split("\n");
+  const anyRunning = lines.some((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || /^NAME\b/i.test(trimmed)) return false;
+    // Match "Up" word in STATUS column
+    return /\bUp\b/.test(line);
+  });
+
+  return { anyRunning };
+}
+
 function detectMissingCompose(message = "") {
   const text = `${message || ""}`.toLowerCase();
   return text.includes("not a docker command") || text.includes('unknown command "compose"') || text.includes("docker-compose is not installed");
@@ -184,22 +254,36 @@ async function runKeepalive(rawArgv = []) {
     if (service) cmdArgs.push(service);
 
     try {
-      const result = await runDockerCommand(cmdArgs);
-      if (result.code !== 0) {
-        console.error(`${label} Warning: docker compose logs exited with code ${result.code}.`);
+      // ── Step 1: Fetch & print logs ───────────────────────────────────────
+      let logsOk = true;
+      try {
+        const result = await runDockerCommand(cmdArgs);
+        if (result.code !== 0) {
+          console.error(`${label} Warning: docker compose logs exited with code ${result.code}.`);
+        }
+      } catch (err) {
+        if (err && err.code === "ENOENT") {
+          console.error(`${label} docker command not found. Please install Docker.`);
+          stopWithCode(1);
+          logsOk = false;
+        } else {
+          console.error(`${label} Warning: failed to execute docker compose logs: ${err && err.message ? err.message : String(err)}`);
+        }
       }
-    } catch (err) {
-      if (err && err.code === "ENOENT") {
-        console.error(`${label} docker command not found. Please install Docker.`);
-        stopWithCode(1);
-        return;
-      }
-      console.error(`${label} Warning: failed to execute docker compose logs: ${err && err.message ? err.message : String(err)}`);
-    } finally {
-      // Update the boundary for the next cycle only after this cycle finishes,
-      // so we never miss log lines that arrived while docker was running.
-      cycleStartedAt = toDockerSince(thisCycleStart);
 
+      // ── Step 2: Container status check ──────────────────────────────────
+      // Run `docker compose ps`, print the status table, and exit if all
+      // containers have stopped — no point polling a dead stack.
+      if (logsOk && !stopRequested) {
+        const { anyRunning } = await checkContainerStatus({ composeFile, service, label });
+        if (!anyRunning) {
+          stopWithCode(0, `${label} All containers have stopped. Exiting. Total cycles: ${cycle}`);
+        }
+      }
+    } finally {
+      // Always update the since-boundary and release the lock, even if an
+      // unexpected error escaped the inner try blocks above.
+      cycleStartedAt = toDockerSince(thisCycleStart);
       process.stdout.write("");
       running = false;
       if (!stopRequested) {
