@@ -10,6 +10,14 @@ function formatTimestamp(date = new Date()) {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
+/**
+ * Format a Date to an ISO-8601 string accepted by `docker compose logs --since`.
+ * Example: "2026-04-05T14:30:00.000Z"
+ */
+function toDockerSince(date) {
+  return date.toISOString();
+}
+
 function printHelp() {
   console.log(
     [
@@ -18,7 +26,7 @@ function printHelp() {
       "Options:",
       "  --interval, -i <seconds>    Log polling interval in seconds (default: 10)",
       "  --service, -s <name>        docker compose service name (default: all services)",
-      "  --tail, -t <lines>          Number of tail lines to fetch (default: 50)",
+      "  --tail, -t <lines>          Number of tail lines to fetch on the FIRST cycle (default: 50)",
       "  --compose-file <path>       docker compose file path (default: docker-compose.yml)",
       '  --label <text>              Prefix label for each cycle (default: "[keepalive]")',
       "  --help, -h                  Print this help",
@@ -123,6 +131,10 @@ async function runKeepalive(rawArgv = []) {
   let running = false;
   let stopRequested = false;
   let resolveStop = null;
+  // ISO timestamp recorded at the START of each cycle.
+  // Cycle N+1 will use --since=<cycleStartedAt> so only genuinely new lines appear.
+  // null = first cycle → use --tail instead.
+  let cycleStartedAt = null;
 
   const stopPromise = new Promise((resolve) => {
     resolveStop = resolve;
@@ -148,12 +160,27 @@ async function runKeepalive(rawArgv = []) {
     running = true;
     cycle += 1;
 
-    const headerTime = formatTimestamp();
+    // Capture the moment this cycle begins BEFORE awaiting docker.
+    // The next cycle will use this as its --since boundary.
+    const thisCycleStart = new Date();
+
+    const headerTime = formatTimestamp(thisCycleStart);
     console.log("─────────────────────────────────────────");
     console.log(`${label} ${headerTime} | Cycle #${cycle}`);
     console.log("─────────────────────────────────────────");
 
-    const cmdArgs = ["compose", "-f", composeFile, "logs", `--tail=${tail}`];
+    // Build log arguments:
+    //   • First cycle  → --tail=N   (show recent history on startup)
+    //   • Later cycles → --since=<ISO> (show ONLY lines newer than previous cycle start)
+    const cmdArgs = ["compose", "-f", composeFile, "logs"];
+    if (cycleStartedAt === null) {
+      cmdArgs.push(`--tail=${tail}`);
+    } else {
+      // --no-log-prefix is not used here intentionally; keep service names visible.
+      cmdArgs.push(`--since=${cycleStartedAt}`);
+      // Also cap with --tail to guard against a burst of lines after a long pause.
+      cmdArgs.push(`--tail=${tail}`);
+    }
     if (service) cmdArgs.push(service);
 
     try {
@@ -169,6 +196,10 @@ async function runKeepalive(rawArgv = []) {
       }
       console.error(`${label} Warning: failed to execute docker compose logs: ${err && err.message ? err.message : String(err)}`);
     } finally {
+      // Update the boundary for the next cycle only after this cycle finishes,
+      // so we never miss log lines that arrived while docker was running.
+      cycleStartedAt = toDockerSince(thisCycleStart);
+
       process.stdout.write("");
       running = false;
       if (!stopRequested) {
