@@ -30,7 +30,7 @@ function printHelp() {
       "  --tail, -t <lines>          Number of tail lines to fetch on the FIRST cycle (default: 50)",
       "  --compose-file <path>       docker compose file path (default: docker-compose.yml)",
       '  --label <text>              Prefix label for each cycle (default: "[keepalive]")',
-      "  --stop-runner-id <value>    Override STOP_RUNNER_ID value written to Firebase",
+      "  --stop-runner-id <value>    Override STOP_RUNNER_ID (fallback: read from env)",
       "  --help, -h                  Print this help",
     ].join("\n"),
   );
@@ -200,10 +200,17 @@ async function runKeepalive(rawArgv = []) {
   console.log(`${label} Start timestamp: ${formatTimestamp()}`);
 
   // ── Remote-stop listener (non-blocking, fire-and-forget) ──────────────────
-  // Allow overriding the STOP_RUNNER_ID from CLI so CI workflows can inject
-  // a dynamic value (e.g. GitHub run/runner identity) without changing .env.
-  const stopRunnerId = stopRunnerIdArg || process.env.STOP_RUNNER_ID;
-  startStopListener({ runnerId: stopRunnerId });
+  // Priority:
+  //   1) CLI --stop-runner-id
+  //   2) Existing STOP_RUNNER_ID in environment
+  // Then normalize back into process.env.STOP_RUNNER_ID so the listener and
+  // downstream checks use the exact same variable name consistently.
+  const stopRunnerIdEnvName = "STOP_RUNNER_ID";
+  const stopRunnerId = stopRunnerIdArg || process.env[stopRunnerIdEnvName] || "";
+  if (stopRunnerId) {
+    process.env[stopRunnerIdEnvName] = stopRunnerId;
+  }
+  startStopListener({ runnerId: process.env[stopRunnerIdEnvName] || "" });
 
   let cycle = 0;
   let timer = null;
