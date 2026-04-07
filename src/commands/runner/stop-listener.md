@@ -2,7 +2,7 @@
 
 Tính năng cho phép **tự động dừng keepalive runner cũ** khi một runner mới khởi động, thông qua Firebase Realtime Database.
 
-Mỗi runner "claim" quyền sở hữu bằng cách ghi unique ID của mình lên Firebase. Khi runner mới ghi đè, runner cũ nhận tín hiệu thay đổi và tự dừng.
+Runner chỉ lắng nghe SSE trong `keepalive`. Việc ghi (claim) unique ID lên Firebase được tách riêng bằng subcommand `runner set-stoprunnerid`. Khi runner mới ghi đè, runner cũ nhận tín hiệu thay đổi và tự dừng.
 
 ---
 
@@ -94,6 +94,16 @@ steps:
 
 > Azure: cần bật **"Allow scripts to access OAuth token"** trong pipeline settings để `SYSTEM_ACCESSTOKEN` có giá trị.
 
+### Ghi ownership tách riêng
+
+```bash
+# ghi explicit value
+npx dotenvrtdb runner set-stoprunnerid my-runner-id
+
+# hoặc lấy từ env STOP_RUNNER_ID
+STOP_RUNNER_ID=my-runner-id npx dotenvrtdb runner set-stoprunnerid
+```
+
 ---
 
 ## Stop sequence
@@ -136,8 +146,9 @@ Dù SSE reconnect nhiều lần, stop sequence **chỉ được trigger đúng m
 
 ```
 src/commands/runner/
-├── keepalive.js        # Gọi startStopListener() một lần khi khởi động
-└── stop-listener.js    # Toàn bộ logic remote stop (module độc lập)
+├── keepalive.js            # Gọi startStopListener() một lần khi khởi động
+├── set-stoprunnerid.js     # Ghi one-shot STOP_RUNNER_ID lên Firebase
+└── stop-listener.js        # Toàn bộ logic remote stop (module độc lập)
 ```
 
 Thay đổi duy nhất trong `keepalive.js`:
