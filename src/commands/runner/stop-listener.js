@@ -194,10 +194,26 @@ function _connectSSE(url, runnerId) {
       }
     });
 
-    res.on("end", () => {
-      if (_stopSequenceTriggered) return;
-      console.warn(`[stop-listener] SSE connection ended, reconnecting in ${reconnectDelay / 1000} s…`);
+    let reconnectScheduled = false;
+    const scheduleReconnect = (reason) => {
+      if (_stopSequenceTriggered || reconnectScheduled) return;
+      reconnectScheduled = true;
+      console.warn(`[stop-listener] SSE ${reason}, reconnecting in ${reconnectDelay / 1000} s…`);
       setTimeout(() => _connectSSE(url, runnerId), reconnectDelay);
+    };
+
+    res.on("end", () => {
+      scheduleReconnect("connection ended");
+    });
+
+    res.on("close", () => {
+      scheduleReconnect("connection closed");
+    });
+
+    res.on("error", (err) => {
+      if (_stopSequenceTriggered) return;
+      console.warn(`[stop-listener] SSE response error: ${err.message}`);
+      scheduleReconnect("response error");
     });
   });
 
