@@ -57,6 +57,27 @@ async function startStopListener(options = {}) {
   _connectSSE(firebaseUrl, runnerId);
 }
 
+/**
+ * Write STOP_RUNNER_ID to Firebase once, without starting SSE listener.
+ * Useful for one-shot ownership update flows.
+ */
+async function setStopRunnerIdOnRealtime(options = {}) {
+  const firebaseUrl = normalizeFirebaseRestUrl(process.env.STOP_FIREBASE_URL || "");
+  const runnerId = options.runnerId || process.env.STOP_RUNNER_ID;
+
+  if (!firebaseUrl) {
+    console.warn("[stop-listener] STOP_FIREBASE_URL not set, skip one-shot update.");
+    return false;
+  }
+
+  if (!runnerId) {
+    console.warn("[stop-listener] STOP_RUNNER_ID not set, skip one-shot update.");
+    return false;
+  }
+
+  return _claimOwnership(firebaseUrl, runnerId);
+}
+
 // ─── Claim ownership ──────────────────────────────────────────────────────────
 
 /**
@@ -424,5 +445,6 @@ function _getFetch() {
 // ─── Exports ──────────────────────────────────────────────────────────────────
 module.exports = {
   startStopListener,
+  setStopRunnerIdOnRealtime,
   executeStopSequence,
 };

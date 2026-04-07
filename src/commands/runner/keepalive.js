@@ -1,5 +1,5 @@
 const spawn = require("cross-spawn");
-const { startStopListener } = require("./stop-listener");
+const { startStopListener, setStopRunnerIdOnRealtime } = require("./stop-listener");
 
 function formatTimestamp(date = new Date()) {
   const year = date.getFullYear();
@@ -30,7 +30,7 @@ function printHelp() {
       "  --tail, -t <lines>          Number of tail lines to fetch on the FIRST cycle (default: 50)",
       "  --compose-file <path>       docker compose file path (default: docker-compose.yml)",
       '  --label <text>              Prefix label for each cycle (default: "[keepalive]")',
-      "  --stop-runner-id <value>    Override STOP_RUNNER_ID (fallback: read from env)",
+      "  --stop-runner-id <value>    One-shot set STOP_RUNNER_ID lên RTDB (không mở listener)",
       "  --help, -h                  Print this help",
     ].join("\n"),
   );
@@ -199,18 +199,26 @@ async function runKeepalive(rawArgv = []) {
   console.log(`${label} Started. Press Ctrl+C to stop. Interval: ${interval}s`);
   console.log(`${label} Start timestamp: ${formatTimestamp()}`);
 
-  // ── Remote-stop listener (non-blocking, fire-and-forget) ──────────────────
+  // ── STOP_RUNNER_ID setup ────────────────────────────────────────────────────
   // Priority:
   //   1) CLI --stop-runner-id
   //   2) Existing STOP_RUNNER_ID in environment
-  // Then normalize back into process.env.STOP_RUNNER_ID so the listener and
-  // downstream checks use the exact same variable name consistently.
+  // Normalize back into process.env.STOP_RUNNER_ID for consistent behavior.
   const stopRunnerIdEnvName = "STOP_RUNNER_ID";
   const stopRunnerId = stopRunnerIdArg || process.env[stopRunnerIdEnvName] || "";
   if (stopRunnerId) {
     process.env[stopRunnerIdEnvName] = stopRunnerId;
   }
-  startStopListener({ runnerId: process.env[stopRunnerIdEnvName] || "" });
+
+  // If --stop-runner-id is explicitly provided, do one-shot realtime update only.
+  // No SSE listener in this mode.
+  const stopRunnerIdArgProvided = Object.prototype.hasOwnProperty.call(argv, "stop-runner-id");
+  if (stopRunnerIdArgProvided) {
+    await setStopRunnerIdOnRealtime({ runnerId: process.env[stopRunnerIdEnvName] || "" });
+  } else {
+    // Default behavior (no --stop-runner-id): start listener as before.
+    startStopListener({ runnerId: process.env[stopRunnerIdEnvName] || "" });
+  }
 
   let cycle = 0;
   let timer = null;
