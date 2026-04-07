@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dotenvrtdb from npm
         run: |
-          npm install -g @tolaptrinhdh61/dotenvrtdb
+          npm install -g @tltdh61/dotenvrtdb
           dotenvrtdb keepalive --stop-runner-id
 
       - name: Create short-lived docker compose stack
