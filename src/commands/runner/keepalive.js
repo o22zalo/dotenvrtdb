@@ -30,6 +30,7 @@ function printHelp() {
       "  --tail, -t <lines>          Number of tail lines to fetch on the FIRST cycle (default: 50)",
       "  --compose-file <path>       docker compose file path (default: docker-compose.yml)",
       '  --label <text>              Prefix label for each cycle (default: "[keepalive]")',
+      "  --stop-runner-id <value>    Override STOP_RUNNER_ID (fallback: read from env)",
       "  --help, -h                  Print this help",
     ].join("\n"),
   );
@@ -168,7 +169,7 @@ async function runKeepalive(rawArgv = []) {
       s: "service",
       t: "tail",
     },
-    string: ["service", "compose-file", "label"],
+    string: ["service", "compose-file", "label", "stop-runner-id"],
     default: {
       interval: 10,
       tail: 50,
@@ -187,6 +188,7 @@ async function runKeepalive(rawArgv = []) {
   const service = typeof argv.service === "string" ? argv.service.trim() : "";
   const composeFile = typeof argv["compose-file"] === "string" && argv["compose-file"].trim() ? argv["compose-file"].trim() : "docker-compose.yml";
   const label = typeof argv.label === "string" && argv.label.trim() ? argv.label.trim() : "[keepalive]";
+  const stopRunnerIdArg = typeof argv["stop-runner-id"] === "string" ? argv["stop-runner-id"].trim() : "";
 
   const availability = await ensureDockerComposeAvailable();
   if (!availability.ok && availability.fatal) {
@@ -198,7 +200,17 @@ async function runKeepalive(rawArgv = []) {
   console.log(`${label} Start timestamp: ${formatTimestamp()}`);
 
   // ── Remote-stop listener (non-blocking, fire-and-forget) ──────────────────
-  startStopListener();
+  // Priority:
+  //   1) CLI --stop-runner-id
+  //   2) Existing STOP_RUNNER_ID in environment
+  // Then normalize back into process.env.STOP_RUNNER_ID so the listener and
+  // downstream checks use the exact same variable name consistently.
+  const stopRunnerIdEnvName = "STOP_RUNNER_ID";
+  const stopRunnerId = stopRunnerIdArg || process.env[stopRunnerIdEnvName] || "";
+  if (stopRunnerId) {
+    process.env[stopRunnerIdEnvName] = stopRunnerId;
+  }
+  startStopListener({ runnerId: process.env[stopRunnerIdEnvName] || "" });
 
   let cycle = 0;
   let timer = null;
