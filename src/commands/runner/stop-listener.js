@@ -1,3 +1,4 @@
+// Path: src/commands/runner/stop-listener.js
 "use strict";
 
 /**
@@ -5,16 +6,12 @@
  *
  * Remote-stop feature for the keepalive runner.
  *
- * Cơ chế: mỗi runner ghi unique ID của mình lên Firebase khi khởi động.
- * Khi có runner mới ghi đè giá trị đó, runner cũ nhận SSE event thấy
- * giá trị ≠ STOP_RUNNER_ID của mình → tự động chạy stop sequence.
- *
  * Environment variables:
- *
  *   STOP_LISTENER_ENABLED   "true" to activate (default: false)
  *   STOP_FIREBASE_URL       Full Firebase REST URL incl. path + ?auth=SECRET
- *   STOP_RUNNER_ID          Unique value of THIS runner (set at the top of your CI flow)
+ *   STOP_RUNNER_ID          Unique value of THIS runner
  *   STOP_POLL_INTERVAL_MS   Reconnect delay on SSE failure in ms (default: 5000)
+ *   STOP_HEARTBEAT_MS       Max silence before force-reconnect in ms (default: 45000)
  */
 
 // ─── Guard: stop sequence fires only once ─────────────────────────────────────
@@ -22,13 +19,6 @@ let _stopSequenceTriggered = false;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/**
- * Call once at keepalive startup (non-blocking, fire-and-forget).
- * Opens an SSE connection; stops this runner if the value changes.
- * (One-shot write ownership handled by runner set-stoprunnerid subcommand.)
- *
- * Does nothing if STOP_LISTENER_ENABLED !== "true".
- */
 async function startStopListener(options = {}) {
   if (process.env.STOP_LISTENER_ENABLED !== "true") return;
 
@@ -49,10 +39,6 @@ async function startStopListener(options = {}) {
   _connectSSE(firebaseUrl, runnerId);
 }
 
-/**
- * Write STOP_RUNNER_ID to Firebase once, without starting SSE listener.
- * Useful for one-shot ownership update flows.
- */
 async function setStopRunnerIdOnRealtime(options = {}) {
   const firebaseUrl = normalizeFirebaseRestUrl(process.env.STOP_FIREBASE_URL || "");
   const runnerId = options.runnerId || process.env.STOP_RUNNER_ID;
@@ -72,14 +58,6 @@ async function setStopRunnerIdOnRealtime(options = {}) {
 
 // ─── Claim ownership ──────────────────────────────────────────────────────────
 
-/**
- * Write this runner's ID to Firebase via HTTP PUT.
- * Uses https built-in — no extra packages needed.
- *
- * @param {string} url       Full Firebase REST URL
- * @param {string} runnerId  The unique value to write
- * @returns {Promise<boolean>} true on success
- */
 function _claimOwnership(url, runnerId) {
   return new Promise((resolve) => {
     const https = require("https");
@@ -111,7 +89,7 @@ function _claimOwnership(url, runnerId) {
         return;
       }
 
-      res.resume(); // drain response body
+      res.resume();
       if (res.statusCode && res.statusCode < 300) {
         console.log(`[stop-listener] Claimed ownership on Firebase (HTTP ${res.statusCode}).`);
         resolve(true);
@@ -133,14 +111,6 @@ function _claimOwnership(url, runnerId) {
 
 // ─── SSE connection ───────────────────────────────────────────────────────────
 
-/**
- * Open an SSE connection to Firebase REST (text/event-stream).
- * Triggers stop if the received value differs from this runner's ID.
- * Reconnects automatically on error or premature close.
- *
- * @param {string} url       Full Firebase REST URL
- * @param {string} runnerId  This runner's unique ID
- */
 function _connectSSE(url, runnerId) {
   if (_stopSequenceTriggered) return;
 
@@ -155,6 +125,8 @@ function _connectSSE(url, runnerId) {
   }
 
   const reconnectDelay = Math.max(1000, parseInt(process.env.STOP_POLL_INTERVAL_MS ?? "5000", 10) || 5000);
+  // FIX: heartbeat timeout — if no chunks arrive within this window, assume connection dead
+  const heartbeatMs = Math.max(15000, parseInt(process.env.STOP_HEARTBEAT_MS ?? "45000", 10) || 45000);
 
   const options = {
     hostname: urlObj.hostname,
@@ -163,11 +135,42 @@ function _connectSSE(url, runnerId) {
     headers: {
       Accept: "text/event-stream",
       "Cache-Control": "no-cache",
+      // FIX: tell server to keep connection alive and not compress
+      Connection: "keep-alive",
+      "Accept-Encoding": "identity",
     },
+  };
+
+  let heartbeatTimer = null;
+  let activeReq = null;
+  let reconnectScheduled = false;
+
+  const scheduleReconnect = (reason) => {
+    clearTimeout(heartbeatTimer);
+    if (_stopSequenceTriggered || reconnectScheduled) return;
+    reconnectScheduled = true;
+    console.warn(`[stop-listener] SSE ${reason}, reconnecting in ${reconnectDelay / 1000} s…`);
+    setTimeout(() => _connectSSE(url, runnerId), reconnectDelay);
+  };
+
+  // FIX: heartbeat watchdog — reset on every data chunk; fire → force-destroy connection
+  const resetHeartbeat = () => {
+    clearTimeout(heartbeatTimer);
+    heartbeatTimer = setTimeout(() => {
+      console.warn(`[stop-listener] SSE heartbeat timeout (${heartbeatMs / 1000}s no data) — force reconnect.`);
+      if (activeReq) {
+        try {
+          activeReq.destroy();
+        } catch {
+          /* ignore */
+        }
+      }
+    }, heartbeatMs);
   };
 
   const req = https.request(options, (res) => {
     if (res.statusCode && [301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+      clearTimeout(heartbeatTimer);
       const redirected = new URL(res.headers.location, urlObj).toString();
       console.log(`[stop-listener] SSE redirected to: ${redirected}`);
       res.resume();
@@ -176,68 +179,79 @@ function _connectSSE(url, runnerId) {
     }
 
     if (res.statusCode && res.statusCode >= 400) {
+      clearTimeout(heartbeatTimer);
       console.error(`[stop-listener] SSE endpoint returned HTTP ${res.statusCode}. ` + "Check STOP_FIREBASE_URL / auth secret. Retrying in 30 s…");
       res.resume();
       setTimeout(() => _connectSSE(url, runnerId), 30_000);
       return;
     }
 
-    console.log(`[stop-listener] SSE connected (HTTP ${res.statusCode}).`);
+    console.log(`[stop-listener] SSE connected (HTTP ${res.statusCode}). Heartbeat: ${heartbeatMs / 1000}s`);
+    resetHeartbeat(); // FIX: start watchdog immediately after connect
 
     let buffer = "";
+    // FIX: track last event type to skip non-put events (keep-alive, cancel)
+    let lastEventType = "";
 
     res.on("data", (chunk) => {
       if (_stopSequenceTriggered) return;
+
+      resetHeartbeat(); // FIX: reset watchdog on every chunk — proves connection is alive
 
       buffer += chunk.toString();
       const lines = buffer.split("\n");
       buffer = lines.pop(); // keep incomplete trailing line
 
       for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        try {
-          const raw = line.replace(/^data:\s*/, "");
+        const trimmed = line.trimEnd(); // FIX: handle \r\n line endings from Firebase
 
-          // Firebase sends null on initial connect — ignore
+        // FIX: track event type — only process "put" or "patch" data lines
+        if (trimmed.startsWith("event:")) {
+          lastEventType = trimmed.replace(/^event:\s*/, "").trim();
+          continue;
+        }
+
+        if (!trimmed.startsWith("data:")) continue;
+
+        // FIX: skip non-data events (keep-alive sends "event: cancel" or "event: keep-alive")
+        if (lastEventType && lastEventType !== "put" && lastEventType !== "patch") {
+          console.log(`[stop-listener] SSE skipping event type: "${lastEventType}"`);
+          lastEventType = "";
+          continue;
+        }
+        lastEventType = ""; // reset after consuming
+
+        try {
+          const raw = trimmed.replace(/^data:\s*/, "");
+
           if (raw === "null" || raw === "") continue;
 
-          // Firebase SSE payload: { "path": "/", "data": <value> }
           const payload = JSON.parse(raw);
           const value = payload?.data;
 
-          // Ignore null / missing values (no one has claimed ownership yet)
+          console.log(`[stop-listener] SSE received value: ${JSON.stringify(value)}`); // FIX: always log received value
+
           if (value === null || value === undefined || value === "") continue;
 
-          // ── Core logic: stop if value is no longer ours ──────────────────
           if (value !== runnerId) {
             console.log(`[stop-listener] Ownership taken: "${value}" ≠ own ID "${runnerId}" — triggering stop.`);
             if (!_stopSequenceTriggered) {
               _stopSequenceTriggered = true;
+              clearTimeout(heartbeatTimer);
               executeStopSequence(); // intentionally not awaited
             }
+          } else {
+            console.log(`[stop-listener] SSE value matches own ID — still owner.`);
           }
-        } catch {
-          // Silently swallow JSON parse errors
+        } catch (e) {
+          // FIX: was silent catch {} — now warn with details for debugging
+          console.warn(`[stop-listener] SSE parse error: ${e.message} | raw: ${trimmed.slice(0, 120)}`);
         }
       }
     });
 
-    let reconnectScheduled = false;
-    const scheduleReconnect = (reason) => {
-      if (_stopSequenceTriggered || reconnectScheduled) return;
-      reconnectScheduled = true;
-      console.warn(`[stop-listener] SSE ${reason}, reconnecting in ${reconnectDelay / 1000} s…`);
-      setTimeout(() => _connectSSE(url, runnerId), reconnectDelay);
-    };
-
-    res.on("end", () => {
-      scheduleReconnect("connection ended");
-    });
-
-    res.on("close", () => {
-      scheduleReconnect("connection closed");
-    });
-
+    res.on("end", () => scheduleReconnect("connection ended"));
+    res.on("close", () => scheduleReconnect("connection closed"));
     res.on("error", (err) => {
       if (_stopSequenceTriggered) return;
       console.warn(`[stop-listener] SSE response error: ${err.message}`);
@@ -245,19 +259,26 @@ function _connectSSE(url, runnerId) {
     });
   });
 
+  // FIX: socket-level keepalive so TCP layer sends keepalive probes
+  // → prevents silent drops on cloud environments (GitHub Actions, Firebase, etc.)
+  req.on("socket", (socket) => {
+    socket.setKeepAlive(true, 15_000); // send TCP keepalive every 15s
+    socket.setTimeout(0); // disable default socket timeout
+  });
+
   req.on("error", (err) => {
+    clearTimeout(heartbeatTimer);
     if (_stopSequenceTriggered) return;
-    console.warn(`[stop-listener] SSE error: ${err.message} — retrying in ${reconnectDelay / 1000} s`);
+    console.warn(`[stop-listener] SSE request error: ${err.message} — retrying in ${reconnectDelay / 1000} s`);
     setTimeout(() => _connectSSE(url, runnerId), reconnectDelay);
   });
 
   req.end();
+  activeReq = req; // FIX: keep reference so heartbeat watchdog can destroy it
 }
 
-/**
- * Firebase REST Database endpoints must end with `.json`.
- * Accepts URLs with/without `.json` and returns normalized URL.
- */
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function normalizeFirebaseRestUrl(rawUrl) {
   if (!rawUrl) return "";
   try {
@@ -271,17 +292,17 @@ function normalizeFirebaseRestUrl(rawUrl) {
   }
 }
 
+function _getFetch() {
+  if (typeof fetch !== "undefined") return fetch;
+  return null;
+}
+
 // ─── Stop sequence ────────────────────────────────────────────────────────────
 
-/**
- * Execute all stop steps in order.
- * Every step is wrapped in its own try/catch — a failure NEVER aborts the sequence.
- * Calls process.exit(0) after all steps complete.
- */
 async function executeStopSequence() {
   console.log("[stop] ==== BEGIN STOP SEQUENCE ====");
 
-  // ── Step 1: docker compose down -v ──────────────────────────────────────────
+  // Step 1: docker compose down -v
   try {
     const { execSync } = require("child_process");
     console.log("[stop] [1] docker compose down -v …");
@@ -291,7 +312,7 @@ async function executeStopSequence() {
     console.warn("[stop] [1] docker compose down failed:", e.message);
   }
 
-  // ── Step 2a: GitHub Actions API cancel ──────────────────────────────────────
+  // Step 2a: GitHub Actions API cancel
   try {
     if (process.env.GITHUB_ACTIONS) {
       console.log("[stop] [2a] GitHub Actions API cancel…");
@@ -321,7 +342,7 @@ async function executeStopSequence() {
     console.warn("[stop] [2a] GitHub API cancel failed:", e.message);
   }
 
-  // ── Step 2b: Azure Pipelines API cancel ─────────────────────────────────────
+  // Step 2b: Azure Pipelines API cancel
   try {
     if (process.env.TF_BUILD) {
       console.log("[stop] [2b] Azure Pipelines API cancel…");
@@ -354,7 +375,7 @@ async function executeStopSequence() {
     console.warn("[stop] [2b] Azure API cancel failed:", e.message);
   }
 
-  // ── Step 3: cgroup kill (Linux) ──────────────────────────────────────────────
+  // Step 3: cgroup kill (Linux)
   try {
     console.log("[stop] [3] Cgroup kill…");
     const fs = require("fs");
@@ -388,7 +409,7 @@ async function executeStopSequence() {
     console.warn("[stop] [3] Cgroup kill failed:", e.message);
   }
 
-  // ── Step 4: process group kill ───────────────────────────────────────────────
+  // Step 4: process group kill
   try {
     console.log("[stop] [4] Process group kill…");
     const { execSync } = require("child_process");
@@ -418,20 +439,8 @@ async function executeStopSequence() {
     console.warn("[stop] [4] Process group kill failed:", e.message);
   }
 
-  // ── Final ────────────────────────────────────────────────────────────────────
   console.log("[stop] ==== STOP SEQUENCE COMPLETE — exiting ====");
   process.exit(0);
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Return the built-in fetch (Node >= 18) or null (Node < 18).
- * Callers must handle null gracefully — no extra packages installed.
- */
-function _getFetch() {
-  if (typeof fetch !== "undefined") return fetch;
-  return null;
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
