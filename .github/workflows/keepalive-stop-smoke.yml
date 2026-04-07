@@ -1,16 +1,6 @@
 name: keepalive stop smoke
-
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "src/commands/runner/keepalive.js"
-      - "src/commands/runner/stop-listener.js"
-      - "src/commands/runner/index.js"
-      - "cli.js"
-      - "package.json"
-      - "package-lock.json"
-      - ".github/workflows/keepalive-stop-smoke.yml"
 
 jobs:
   smoke-stop:
@@ -25,10 +15,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dotenvrtdb from npm
+        run: npm install -g dotenvrtdb
 
       - name: Create short-lived docker compose stack
         run: |
@@ -46,16 +35,14 @@ jobs:
         env:
           STOP_LISTENER_ENABLED: "true"
           STOP_FIREBASE_URL: ${{ secrets.STOP_FIREBASE_URL }}
+          STOP_RUNNER_ID: ${{ runner.name }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
 
-          STOP_RUNNER_VALUE="${{ runner.name }}-${{ github.run_id }}-${{ github.run_attempt }}"
-
-          node cli.js runner keepalive \
+          dotenvrtdb runner keepalive \
             --interval 1 \
             --tail 20 \
             --compose-file docker-compose.keepalive-smoke.yml \
-            --stop-runner-id "$STOP_RUNNER_VALUE" \
             --label "[gha-smoke]" \
             > keepalive.log 2>&1
 
