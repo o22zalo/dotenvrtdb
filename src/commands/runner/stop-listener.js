@@ -24,8 +24,8 @@ let _stopSequenceTriggered = false;
 
 /**
  * Call once at keepalive startup (non-blocking, fire-and-forget).
- * 1. Writes STOP_RUNNER_ID to Firebase to claim ownership.
- * 2. Opens an SSE connection; stops this runner if the value changes.
+ * Opens an SSE connection; stops this runner if the value changes.
+ * (One-shot write ownership handled by runner set-stoprunnerid subcommand.)
  *
  * Does nothing if STOP_LISTENER_ENABLED !== "true".
  */
@@ -45,14 +45,6 @@ async function startStopListener(options = {}) {
     return;
   }
 
-  // ── Step 1: Claim ownership — write our ID to Firebase ──────────────────────
-  const claimed = await _claimOwnership(firebaseUrl, runnerId);
-  if (!claimed) {
-    // Non-fatal: still start the listener so we can detect a takeover.
-    console.warn("[stop-listener] Could not write STOP_RUNNER_ID to Firebase, continuing anyway.");
-  }
-
-  // ── Step 2: Start SSE listener ───────────────────────────────────────────────
   console.log(`[stop-listener] Starting SSE listener (runner ID: "${runnerId}")…`);
   _connectSSE(firebaseUrl, runnerId);
 }
