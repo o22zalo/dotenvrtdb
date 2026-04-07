@@ -108,6 +108,18 @@ dotenvrtdb runner keepalive --interval 5 --service app --tail 20
 
 `keepalive` handles `SIGINT`/`SIGTERM` for graceful shutdown and prints total cycles before exiting.
 
+#### Runner: set-stoprunnerid
+
+Dùng subcommand này để ghi one-shot `STOP_RUNNER_ID` lên Firebase Realtime Database.
+
+```bash
+# truyền trực tiếp runner id
+dotenvrtdb runner set-stoprunnerid my-runner-id
+
+# hoặc dùng giá trị mặc định từ env STOP_RUNNER_ID
+STOP_RUNNER_ID=my-runner-id dotenvrtdb runner set-stoprunnerid
+```
+
 ### 🔥 Remote Database Sync
 
 #### Pull environment variables from remote database

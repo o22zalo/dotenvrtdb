@@ -425,8 +425,9 @@ function printHelp() {
       "  -o, --override      override system variables. Cannot be used along with cascade (-c).",
       "",
       "Subcommands:",
-      "  runner keepalive     Keep CI runner alive by periodically printing docker compose logs",
-      "  docker               Docker command namespace (scaffold for future subcommands)",
+      "  runner keepalive          Keep CI runner alive by periodically printing docker compose logs",
+      "  runner set-stoprunnerid  One-shot update STOP_RUNNER_ID value on realtime",
+      "  docker                    Docker command namespace (scaffold for future subcommands)",
       "  command             `command` is the actual command you want to run. Best practice is to precede this command with ` -- `. Everything after `--` is considered to be your command. So any flags will not be parsed by this tool but be passed to your command. If you do not do it, this tool will strip those flags",
     ].join("\n"),
   );
