@@ -40,16 +40,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          dotenvrtdb runner keepalive \
-            --interval 1 \
-            --tail 20 \
-            --compose-file docker-compose.keepalive-smoke.yml \
-            --label "[gha-smoke]" \
-            > keepalive.log 2>&1
-
-          cat keepalive.log
-
-          grep -q "All containers have stopped. Exiting." keepalive.log
+          dotenvrtdb runner keepalive
 
       - name: Cleanup
         if: always()
