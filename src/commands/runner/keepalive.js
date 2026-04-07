@@ -1,4 +1,5 @@
 const spawn = require("cross-spawn");
+const { startStopListener } = require("./stop-listener");
 
 function formatTimestamp(date = new Date()) {
   const year = date.getFullYear();
@@ -195,6 +196,9 @@ async function runKeepalive(rawArgv = []) {
 
   console.log(`${label} Started. Press Ctrl+C to stop. Interval: ${interval}s`);
   console.log(`${label} Start timestamp: ${formatTimestamp()}`);
+
+  // ── Remote-stop listener (non-blocking, fire-and-forget) ──────────────────
+  startStopListener();
 
   let cycle = 0;
   let timer = null;
