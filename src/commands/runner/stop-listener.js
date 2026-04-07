@@ -32,7 +32,7 @@ let _stopSequenceTriggered = false;
 async function startStopListener(options = {}) {
   if (process.env.STOP_LISTENER_ENABLED !== "true") return;
 
-  const firebaseUrl = process.env.STOP_FIREBASE_URL;
+  const firebaseUrl = normalizeFirebaseRestUrl(process.env.STOP_FIREBASE_URL || "");
   const runnerId = options.runnerId || process.env.STOP_RUNNER_ID;
 
   if (!firebaseUrl) {
@@ -91,6 +91,13 @@ function _claimOwnership(url, runnerId) {
     };
 
     const req = https.request(options, (res) => {
+      if (res.statusCode && [301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        const redirected = new URL(res.headers.location, urlObj).toString();
+        _claimOwnership(redirected, runnerId).then(resolve);
+        return;
+      }
+
       res.resume(); // drain response body
       if (res.statusCode && res.statusCode < 300) {
         console.log(`[stop-listener] Claimed ownership on Firebase (HTTP ${res.statusCode}).`);
@@ -147,6 +154,14 @@ function _connectSSE(url, runnerId) {
   };
 
   const req = https.request(options, (res) => {
+    if (res.statusCode && [301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+      const redirected = new URL(res.headers.location, urlObj).toString();
+      console.log(`[stop-listener] SSE redirected to: ${redirected}`);
+      res.resume();
+      _connectSSE(redirected, runnerId);
+      return;
+    }
+
     if (res.statusCode && res.statusCode >= 400) {
       console.error(`[stop-listener] SSE endpoint returned HTTP ${res.statusCode}. ` + "Check STOP_FIREBASE_URL / auth secret. Retrying in 30 s…");
       res.resume();
@@ -224,6 +239,23 @@ function _connectSSE(url, runnerId) {
   });
 
   req.end();
+}
+
+/**
+ * Firebase REST Database endpoints must end with `.json`.
+ * Accepts URLs with/without `.json` and returns normalized URL.
+ */
+function normalizeFirebaseRestUrl(rawUrl) {
+  if (!rawUrl) return "";
+  try {
+    const u = new URL(rawUrl);
+    if (!u.pathname.endsWith(".json")) {
+      u.pathname = `${u.pathname.replace(/\/+$/, "")}.json`;
+    }
+    return u.toString();
+  } catch {
+    return rawUrl;
+  }
 }
 
 // ─── Stop sequence ────────────────────────────────────────────────────────────
