@@ -1,0 +1,68 @@
+name: keepalive stop smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/commands/runner/keepalive.js"
+      - "src/commands/runner/stop-listener.js"
+      - "src/commands/runner/index.js"
+      - "cli.js"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/keepalive-stop-smoke.yml"
+
+jobs:
+  smoke-stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create short-lived docker compose stack
+        run: |
+          cat > docker-compose.keepalive-smoke.yml <<'EOF'
+          services:
+            demo:
+              image: alpine:3.20
+              command: ["sh", "-lc", "echo 'demo start'; sleep 3; echo 'demo done'"]
+          EOF
+
+      - name: Start stack
+        run: docker compose -f docker-compose.keepalive-smoke.yml up -d
+
+      - name: Run keepalive and verify auto-stop
+        env:
+          STOP_LISTENER_ENABLED: "true"
+          STOP_FIREBASE_URL: ${{ secrets.STOP_FIREBASE_URL }}
+        run: |
+          set -euo pipefail
+
+          STOP_RUNNER_VALUE="${{ runner.name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          node cli.js runner keepalive \
+            --interval 1 \
+            --tail 20 \
+            --compose-file docker-compose.keepalive-smoke.yml \
+            --stop-runner-id "$STOP_RUNNER_VALUE" \
+            --label "[gha-smoke]" \
+            > keepalive.log 2>&1
+
+          cat keepalive.log
+
+          grep -q "All containers have stopped. Exiting." keepalive.log
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f docker-compose.keepalive-smoke.yml down -v --remove-orphans

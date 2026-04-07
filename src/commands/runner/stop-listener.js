@@ -29,11 +29,11 @@ let _stopSequenceTriggered = false;
  *
  * Does nothing if STOP_LISTENER_ENABLED !== "true".
  */
-async function startStopListener() {
+async function startStopListener(options = {}) {
   if (process.env.STOP_LISTENER_ENABLED !== "true") return;
 
   const firebaseUrl = process.env.STOP_FIREBASE_URL;
-  const runnerId = process.env.STOP_RUNNER_ID;
+  const runnerId = options.runnerId || process.env.STOP_RUNNER_ID;
 
   if (!firebaseUrl) {
     console.warn("[stop-listener] STOP_FIREBASE_URL not set, skipping.");
