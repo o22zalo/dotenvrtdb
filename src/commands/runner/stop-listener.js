@@ -13,6 +13,7 @@
  *   STOP_POLL_INTERVAL_MS      SSE reconnect delay in ms (default: 5000)
  *   STOP_HEARTBEAT_MS          Max silence before force-reconnect in ms (default: 45000)
  *   STOP_VALUE_POLL_INTERVAL_MS Poll interval to verify exact value via GET (default: STOP_POLL_INTERVAL_MS)
+ *   STOP_REQUEST_EXIT_CODE     Exit code used when remote stop/ownership loss is detected (default: 0)
  */
 
 let _listenerStarted = false;
@@ -110,6 +111,19 @@ async function setStopRunnerIdOnRealtime(options = {}) {
   return _claimOwnership(firebaseUrl, runnerId);
 }
 
+function parseStopRequestExitCode() {
+  const raw = `${process.env.STOP_REQUEST_EXIT_CODE ?? ""}`.trim();
+  if (!raw) return 0;
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 255) {
+    console.warn(`[stop-listener] Invalid STOP_REQUEST_EXIT_CODE=${JSON.stringify(raw)}. Falling back to 0.`);
+    return 0;
+  }
+
+  return parsed;
+}
+
 function requestStop(options = {}) {
   if (isStopRequested()) return false;
 
@@ -124,7 +138,7 @@ function requestStop(options = {}) {
     requestedAt: new Date().toISOString(),
     observedValue: options.observedValue,
     runnerId,
-    exitCode: Number.isInteger(options.exitCode) ? options.exitCode : 130,
+    exitCode: Number.isInteger(options.exitCode) ? options.exitCode : parseStopRequestExitCode(),
   };
 
   _cleanupListenerResources();
@@ -443,16 +457,41 @@ function _observeRunnerIdValue({ source, runnerId, observedValue, meta = {} }) {
     _lastObservedLogKey = logKey;
   }
 
-  if (normalizedObserved !== ownId) {
-    requestStop({
-      source,
-      runnerId: ownId,
-      observedValue: normalizedObserved,
-      reason: `Ownership changed to ${JSON.stringify(normalizedObserved)} (expected ${JSON.stringify(ownId)}).`,
-      exitCode: 130,
-      fireRemoteCancel: true,
-    });
+  if (normalizedObserved === ownId) {
+    return;
   }
+
+  const stopClassification = _classifyObservedOwnerValue({ observedValue: normalizedObserved, ownId });
+
+  requestStop({
+    source,
+    runnerId: ownId,
+    observedValue: normalizedObserved,
+    reason: stopClassification.reason,
+    exitCode: parseStopRequestExitCode(),
+    fireRemoteCancel: true,
+  });
+}
+
+function _classifyObservedOwnerValue({ observedValue, ownId }) {
+  const normalizedObserved = `${observedValue || ""}`;
+  const normalizedOwnId = `${ownId || ""}`.trim();
+
+  if (!normalizedOwnId) {
+    return {
+      reason: `Observed control value changed to ${JSON.stringify(normalizedObserved)} while STOP_RUNNER_ID is empty.`,
+    };
+  }
+
+  if (normalizedObserved === `stop-${normalizedOwnId}` || normalizedObserved === `stop:${normalizedOwnId}`) {
+    return {
+      reason: `Explicit stop token ${JSON.stringify(normalizedObserved)} matched this runner (${JSON.stringify(normalizedOwnId)}).`,
+    };
+  }
+
+  return {
+    reason: `Ownership changed to ${JSON.stringify(normalizedObserved)} (expected ${JSON.stringify(normalizedOwnId)}).`,
+  };
 }
 
 function _applyFirebaseEvent(currentValue, payload, eventType) {

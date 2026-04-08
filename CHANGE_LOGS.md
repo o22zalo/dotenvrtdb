@@ -1,4 +1,19 @@
 Path:CHANGE_LOGS.md
+## 2026-04-08 — remote keepalive stop now exits cleanly with code 0
+
+### Technical changes
+- Updated `src/commands/runner/stop-listener.js` so remote stop / ownership-loss now defaults to exit code `0` instead of `130`, while still allowing override through `STOP_REQUEST_EXIT_CODE`.
+- Adjusted `.github/workflows/keepalive-stop-smoke.yml` to export `STOP_REQUEST_EXIT_CODE=0` and assert the keepalive wrapper exits successfully when stop is requested.
+- Escaped shell variable usage inside the smoke-test compose file from `${i}` to `$${i}` so Docker Compose no longer attempts variable interpolation and emits the `The "i" variable is not set` warning.
+- Expanded `src/commands/runner/stop-listener.md` to explain both the clean-exit default and the Docker Compose interpolation warning.
+
+## 2026-04-08 — clarify explicit stop token vs ownership loss in runner stop-listener
+
+### Technical changes
+- Updated `src/commands/runner/stop-listener.js` to classify `stop-<runner-id>` and `stop:<runner-id>` as explicit stop tokens for the current runner, while preserving the existing rule that any other non-equal scalar owner value triggers stop.
+- Adjusted `.github/workflows/keepalive-stop-smoke.yml` to switch the RTDB value to `replacement-...` instead of `stop-...`, so the smoke test now demonstrates ownership loss unambiguously.
+- Expanded `src/commands/runner/stop-listener.md` to document the difference between explicit stop tokens and ordinary ownership changes.
+
 ## 2026-04-08 — smoke workflow now verifies fast keepalive stop end-to-end
 
 ### Technical changes

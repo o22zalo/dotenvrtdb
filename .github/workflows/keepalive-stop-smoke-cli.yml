@@ -26,7 +26,7 @@ jobs:
           node-version: 20
 
       - name: Install dependencies from repository
-        run: npm install -g @tolaptrinhdh61/dotenvrtdb
+        run: npm install -g @tltdh61/dotenvrtdb
 
       - name: Claim initial runner ownership
         run: dotenvrtdb runner set-stoprunnerid

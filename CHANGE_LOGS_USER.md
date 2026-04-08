@@ -1,4 +1,16 @@
 Path:CHANGE_LOGS_USER.md
+## 2026-04-08 — keepalive remote stop giờ kết thúc hợp lệ với exit code 0
+
+- Khi runner bị đổi owner hoặc nhận remote stop, `keepalive` giờ sẽ thoát với mã `0` theo mặc định để CI hiểu đây là dừng hợp lệ, không phải lỗi.
+- Workflow smoke mẫu cũng đã đổi sang kiểm tra exit code `0`.
+- Warning `The "i" variable is not set` trong workflow demo đã được loại bỏ bằng cách escape đúng biến shell trong `docker-compose.yml`.
+
+## 2026-04-08 — log stop rõ nghĩa hơn và smoke test không còn gây hiểu nhầm
+
+- Listener giờ phân biệt rõ giữa “mất ownership” và “explicit stop token” cho chính runner hiện tại.
+- Workflow smoke không còn đổi value sang `stop-...`; giờ dùng `replacement-...` để nhìn log là biết ngay đang test mất ownership.
+- Tài liệu đi kèm đã giải thích rõ 2 trường hợp này để tránh hiểu nhầm khi đọc log runtime.
+
 ## 2026-04-08 — workflow smoke đã kiểm tra thật việc keepalive tự dừng nhanh
 
 - File workflow mẫu giờ không còn chỉ chạy `keepalive` rồi chờ thủ công.
