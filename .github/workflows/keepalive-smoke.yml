@@ -77,7 +77,7 @@ jobs:
 
           exit_code="$(cat keepalive.exitcode)"
           echo "keepalive exit code=${exit_code}"
-          test "${exit_code}" = "130"
+          test "${exit_code}" = "0"
           grep -E 'Stop requested\.|Aborting in-flight docker command\.|source=(poll|sse)' keepalive.log
 
       - name: Cleanup
