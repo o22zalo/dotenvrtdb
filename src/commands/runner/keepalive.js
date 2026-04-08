@@ -1,5 +1,6 @@
+// Path: src/commands/runner/keepalive.js
 const spawn = require("cross-spawn");
-const { startStopListener } = require("./stop-listener");
+const { getStopState, isStopRequested, onStopRequested, startStopListener } = require("./stop-listener");
 
 function formatTimestamp(date = new Date()) {
   const year = date.getFullYear();
@@ -11,12 +12,12 @@ function formatTimestamp(date = new Date()) {
   return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 }
 
-/**
- * Format a Date to an ISO-8601 string accepted by `docker compose logs --since`.
- * Example: "2026-04-05T14:30:00.000Z"
- */
 function toDockerSince(date) {
   return date.toISOString();
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function printHelp() {
@@ -41,9 +42,10 @@ function parsePositiveInteger(value, fallback) {
   return n;
 }
 
-function runDockerCommand(args = []) {
+function runDockerCommand(args = [], hooks = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    hooks.onStart?.(child);
 
     let stdout = "";
     let stderr = "";
@@ -60,18 +62,22 @@ function runDockerCommand(args = []) {
       process.stderr.write(text);
     });
 
-    child.on("error", (err) => reject(err));
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("error", (err) => {
+      hooks.onClose?.(child);
+      reject(err);
+    });
+
+    child.on("close", (code, signal) => {
+      hooks.onClose?.(child);
+      resolve({ code, signal, stdout, stderr });
+    });
   });
 }
 
-/**
- * Run a docker command and capture stdout/stderr WITHOUT streaming to process stdout/stderr.
- * Used when we need to inspect the output before (or instead of) printing it.
- */
-function runDockerCommandCapture(args = []) {
+function runDockerCommandCapture(args = [], hooks = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    hooks.onStart?.(child);
 
     let stdout = "";
     let stderr = "";
@@ -79,56 +85,50 @@ function runDockerCommandCapture(args = []) {
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
     });
+
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
     });
 
-    child.on("error", (err) => reject(err));
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("error", (err) => {
+      hooks.onClose?.(child);
+      reject(err);
+    });
+
+    child.on("close", (code, signal) => {
+      hooks.onClose?.(child);
+      resolve({ code, signal, stdout, stderr });
+    });
   });
 }
 
-/**
- * Run `docker compose ps` for the given compose file (and optional service),
- * print the container status table, then return whether any container is still running.
- *
- * "Running" is detected by the STATUS column starting with "Up" which is the standard
- * docker compose ps output format across Compose v2 versions.
- *
- * @returns {{ anyRunning: boolean }}
- */
-async function checkContainerStatus({ composeFile, service, label }) {
+async function checkContainerStatus({ composeFile, service, label, hooks = {} }) {
   const psArgs = ["compose", "-f", composeFile, "ps"];
   if (service) psArgs.push(service);
 
   let result;
   try {
-    result = await runDockerCommandCapture(psArgs);
+    result = await runDockerCommandCapture(psArgs, hooks);
   } catch (err) {
-    // Non-fatal — just skip the check this cycle
     console.error(`${label} Warning: could not run docker compose ps: ${err && err.message ? err.message : String(err)}`);
-    return { anyRunning: true }; // assume still running to avoid premature exit
+    return { anyRunning: true };
   }
 
-  // ── Print the captured table ──────────────────────────────────────────────
   console.log("┄┄┄ Container Status ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
 
   if (result.code !== 0) {
-    console.error(`${label} Warning: docker compose ps exited with code ${result.code}.`);
-    return { anyRunning: true }; // cannot determine state reliably
+    if (!(result.signal && (result.signal === "SIGTERM" || result.signal === "SIGINT"))) {
+      console.error(`${label} Warning: docker compose ps exited with code ${result.code}.`);
+    }
+    return { anyRunning: true };
   }
 
-  // ── Detect running containers ─────────────────────────────────────────────
-  // docker compose ps STATUS column: "Up X minutes" | "Up X hours" etc.
-  // Exited containers show:          "Exited (N) X ago"
-  // Header line starts with "NAME"  — skip it.
   const lines = result.stdout.split("\n");
   const anyRunning = lines.some((line) => {
     const trimmed = line.trim();
     if (!trimmed || /^NAME\b/i.test(trimmed)) return false;
-    // Match "Up" word in STATUS column
     return /\bUp\b/.test(line);
   });
 
@@ -156,6 +156,46 @@ async function ensureDockerComposeAvailable() {
       return { ok: false, fatal: true, message: "docker command not found. Please install Docker Desktop/Engine with docker compose." };
     }
     return { ok: false, fatal: true, message: err && err.message ? err.message : String(err) };
+  }
+}
+
+function describeStopState(label, state) {
+  if (!state || !state.requested) {
+    return `${label} Stop requested.`;
+  }
+
+  const parts = [`${label} Stop requested.`];
+  if (state.source) parts.push(`source=${state.source}`);
+  if (state.reason) parts.push(`reason=${state.reason}`);
+  if (state.observedValue !== undefined) parts.push(`observed=${JSON.stringify(state.observedValue)}`);
+  if (state.requestedAt) parts.push(`at=${state.requestedAt}`);
+  return parts.join(" | ");
+}
+
+function killChildProcess(child, label, reason) {
+  if (!child || child.exitCode !== null || child.killed) return false;
+
+  const childPid = child.pid;
+  console.log(`${label} Aborting in-flight docker command. reason=${reason}${childPid ? ` | pid=${childPid}` : ""}`);
+
+  try {
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill", ["/PID", `${childPid}`, "/T", "/F"], { stdio: "ignore" });
+      killer.on("error", () => {
+        try {
+          child.kill();
+        } catch {
+          /* ignore */
+        }
+      });
+      return true;
+    }
+
+    child.kill("SIGTERM");
+    return true;
+  } catch (err) {
+    console.warn(`${label} Failed to abort docker command: ${err && err.message ? err.message : String(err)}`);
+    return false;
   }
 }
 
@@ -197,111 +237,210 @@ async function runKeepalive(rawArgv = []) {
   console.log(`${label} Started. Press Ctrl+C to stop. Interval: ${interval}s`);
   console.log(`${label} Start timestamp: ${formatTimestamp()}`);
 
-  // Keep behavior: nếu có STOP_RUNNER_ID trong env thì listener sẽ dùng giá trị đó.
-  // Không còn logic ghi one-shot tại keepalive.
-  startStopListener({ runnerId: process.env.STOP_RUNNER_ID || "" });
-
   let cycle = 0;
   let timer = null;
   let running = false;
   let stopRequested = false;
   let resolveStop = null;
-  // ISO timestamp recorded at the START of each cycle.
-  // Cycle N+1 will use --since=<cycleStartedAt> so only genuinely new lines appear.
-  // null = first cycle → use --tail instead.
   let cycleStartedAt = null;
+  let activeDockerChild = null;
+  let activeDockerKillTimer = null;
+  let currentCyclePromise = null;
 
   const stopPromise = new Promise((resolve) => {
     resolveStop = resolve;
   });
 
+  const clearActiveDocker = (child) => {
+    if (!child || activeDockerChild === child) {
+      activeDockerChild = null;
+    }
+    if (activeDockerKillTimer) {
+      clearTimeout(activeDockerKillTimer);
+      activeDockerKillTimer = null;
+    }
+  };
+
+  const registerActiveDocker = (child) => {
+    activeDockerChild = child;
+    if (activeDockerKillTimer) {
+      clearTimeout(activeDockerKillTimer);
+      activeDockerKillTimer = null;
+    }
+  };
+
+  const abortActiveDockerIfNeeded = (reason) => {
+    const child = activeDockerChild;
+    if (!child) return false;
+
+    const terminated = killChildProcess(child, label, reason);
+    if (terminated && process.platform !== "win32") {
+      activeDockerKillTimer = setTimeout(() => {
+        if (activeDockerChild && activeDockerChild === child && activeDockerChild.exitCode === null) {
+          try {
+            console.warn(`${label} Escalating docker command kill to SIGKILL.`);
+            activeDockerChild.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+        }
+      }, 1000);
+      activeDockerKillTimer.unref?.();
+    }
+
+    return terminated;
+  };
+
   const stopWithCode = (code = 0, message = "") => {
     if (stopRequested) return;
     stopRequested = true;
-    if (timer) clearTimeout(timer);
+
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+
+    abortActiveDockerIfNeeded(message || "stop requested");
+
     if (message) console.log(message);
     if (resolveStop) resolveStop(code);
   };
 
-  const shutdown = () => {
-    stopWithCode(0, `${label} Shutting down gracefully... Total cycles: ${cycle}`);
+  const stopFromSharedState = () => {
+    if (!isStopRequested()) return false;
+    const state = getStopState();
+    stopWithCode(Number.isInteger(state.exitCode) ? state.exitCode : 130, describeStopState(label, state));
+    return true;
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  const unsubscribeStop = onStopRequested((state) => {
+    stopWithCode(Number.isInteger(state.exitCode) ? state.exitCode : 130, describeStopState(label, state));
+  });
+
+  const handleSignal = (signalName) => {
+    const baseMessage = isStopRequested()
+      ? `${describeStopState(label, getStopState())} | signal=${signalName}`
+      : `${label} Received ${signalName}. Shutting down gracefully... Total cycles: ${cycle}`;
+
+    stopWithCode(signalName === "SIGINT" ? 130 : 0, baseMessage);
+  };
+
+  const onSigint = () => handleSignal("SIGINT");
+  const onSigterm = () => handleSignal("SIGTERM");
+
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+
+  await startStopListener({ runnerId: process.env.STOP_RUNNER_ID || "" });
+  if (stopFromSharedState()) {
+    const exitCode = await stopPromise;
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    unsubscribeStop();
+    return exitCode;
+  }
 
   const runCycle = async () => {
-    if (stopRequested || running) return;
+    if (running) return;
+    if (stopRequested || stopFromSharedState()) return;
+
     running = true;
     cycle += 1;
 
-    // Capture the moment this cycle begins BEFORE awaiting docker.
-    // The next cycle will use this as its --since boundary.
     const thisCycleStart = new Date();
-
     const headerTime = formatTimestamp(thisCycleStart);
+
     console.log("─────────────────────────────────────────");
     console.log(`${label} ${headerTime} | Cycle #${cycle}`);
     console.log("─────────────────────────────────────────");
 
-    // Build log arguments:
-    //   • First cycle  → --tail=N   (show recent history on startup)
-    //   • Later cycles → --since=<ISO> (show ONLY lines newer than previous cycle start)
     const cmdArgs = ["compose", "-f", composeFile, "logs"];
     if (cycleStartedAt === null) {
       cmdArgs.push(`--tail=${tail}`);
     } else {
-      // --no-log-prefix is not used here intentionally; keep service names visible.
       cmdArgs.push(`--since=${cycleStartedAt}`);
-      // Also cap with --tail to guard against a burst of lines after a long pause.
       cmdArgs.push(`--tail=${tail}`);
     }
     if (service) cmdArgs.push(service);
 
     try {
-      // ── Step 1: Fetch & print logs ───────────────────────────────────────
+      if (stopRequested || stopFromSharedState()) return;
+
       let logsOk = true;
       try {
-        const result = await runDockerCommand(cmdArgs);
+        const result = await runDockerCommand(cmdArgs, {
+          onStart: registerActiveDocker,
+          onClose: clearActiveDocker,
+        });
+
+        if (stopRequested || isStopRequested()) {
+          console.log(`${label} docker compose logs interrupted because stop was requested.`);
+          return;
+        }
+
         if (result.code !== 0) {
           console.error(`${label} Warning: docker compose logs exited with code ${result.code}.`);
         }
       } catch (err) {
+        if (stopRequested || isStopRequested()) {
+          console.log(`${label} docker compose logs aborted after stop request.`);
+          return;
+        }
+
         if (err && err.code === "ENOENT") {
           console.error(`${label} docker command not found. Please install Docker.`);
-          stopWithCode(1);
+          stopWithCode(1, `${label} Stopping because docker command is unavailable.`);
           logsOk = false;
         } else {
           console.error(`${label} Warning: failed to execute docker compose logs: ${err && err.message ? err.message : String(err)}`);
         }
       }
 
-      // ── Step 2: Container status check ──────────────────────────────────
-      // Run `docker compose ps`, print the status table, and exit if all
-      // containers have stopped — no point polling a dead stack.
-      if (logsOk && !stopRequested) {
-        const { anyRunning } = await checkContainerStatus({ composeFile, service, label });
+      if (stopRequested || stopFromSharedState()) return;
+
+      if (logsOk) {
+        const { anyRunning } = await checkContainerStatus({
+          composeFile,
+          service,
+          label,
+          hooks: {
+            onStart: registerActiveDocker,
+            onClose: clearActiveDocker,
+          },
+        });
+
+        if (stopRequested || stopFromSharedState()) return;
+
         if (!anyRunning) {
           stopWithCode(0, `${label} All containers have stopped. Exiting. Total cycles: ${cycle}`);
         }
       }
     } finally {
-      // Always update the since-boundary and release the lock, even if an
-      // unexpected error escaped the inner try blocks above.
       cycleStartedAt = toDockerSince(thisCycleStart);
       process.stdout.write("");
       running = false;
-      if (!stopRequested) {
+
+      if (!stopRequested && !isStopRequested()) {
         timer = setTimeout(runCycle, interval * 1000);
       }
     }
   };
 
-  runCycle();
+  currentCyclePromise = runCycle().catch((err) => {
+    console.error(`${label} Fatal cycle error: ${err && err.message ? err.message : String(err)}`);
+    stopWithCode(1, `${label} Stopping because runCycle crashed.`);
+  });
+
   const exitCode = await stopPromise;
 
-  process.off("SIGINT", shutdown);
-  process.off("SIGTERM", shutdown);
+  await Promise.race([
+    Promise.resolve(currentCyclePromise).catch(() => undefined),
+    wait(1500),
+  ]);
+
+  process.off("SIGINT", onSigint);
+  process.off("SIGTERM", onSigterm);
+  unsubscribeStop();
 
   return exitCode;
 }
