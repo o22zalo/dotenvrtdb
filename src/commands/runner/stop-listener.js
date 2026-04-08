@@ -372,7 +372,9 @@ async function executeStopSequence() {
   // ─── PHASE 3: Kill toàn bộ process (self-destruct) ───────────────────────────
   // 3a — cgroup v2
   try {
+    console.log(`[stop] [3a] /proc/self/cgroup`);
     const cgroupContent = fs.readFileSync("/proc/self/cgroup", "utf8");
+    console.log(`[stop] [3a] ${cgroupContent}`);
     const cgroupLine = cgroupContent
       .split("\n")
       .find((l) => l.startsWith("0::"))
@@ -399,6 +401,7 @@ async function executeStopSequence() {
 
   // 3b — process group
   try {
+    console.log(`[stop] [3b] ps -o pgid= -p ${process.pid}`);
     const pgidRaw = execSync(`ps -o pgid= -p ${process.pid}`).toString().trim();
     const pgid = parseInt(pgidRaw, 10);
     if (Number.isFinite(pgid) && pgid > 0) {
