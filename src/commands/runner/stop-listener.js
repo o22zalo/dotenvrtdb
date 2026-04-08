@@ -300,21 +300,26 @@ function _getFetch() {
 // ─── Stop sequence ────────────────────────────────────────────────────────────
 async function executeStopSequence() {
   console.log("[stop] ==== BEGIN STOP SEQUENCE (parallel) ====");
+  const { execSync, execFileSync } = require("child_process");
+  const fs = require("fs");
 
+  // ─── Step 1: docker compose kill (SIGKILL ngay, không chờ graceful) ──────────
   const step1 = (async () => {
     try {
-      const { execSync } = require("child_process");
-      console.log("[stop] [1] docker compose down -v …");
-      execSync("docker compose down -v", { stdio: "inherit", timeout: 30_000 });
+      console.log("[stop] [1] docker compose kill …");
+      execSync("docker compose kill", { stdio: "inherit", timeout: 10_000 });
+      console.log("[stop] [1] docker compose kill done.");
+      // cleanup volumes sau khi đã kill xong
+      execSync("docker compose down -v --timeout 0", { stdio: "inherit", timeout: 15_000 });
       console.log("[stop] [1] docker compose down done.");
     } catch (e) {
-      console.warn("[stop] [1] docker compose down failed:", e.message);
+      console.warn("[stop] [1] docker step failed:", e.message);
     }
   })();
 
+  // ─── Step 2a: GitHub Actions cancel ──────────────────────────────────────────
   const step2a = (async () => {
     try {
-      // if (!process.env.GITHUB_ACTIONS) return;
       console.log("[stop] [2a] GitHub Actions API cancel…");
       const [owner, repo] = (process.env.GITHUB_REPOSITORY ?? "").split("/");
       const runId = process.env.GITHUB_RUN_ID;
@@ -325,7 +330,7 @@ async function executeStopSequence() {
       }
       const fetchFn = _getFetch();
       if (!fetchFn) {
-        console.warn("[stop] [2a] fetch not available (Node < 18), skipping.");
+        console.warn("[stop] [2a] fetch not available, skipping.");
         return;
       }
       const res = await fetchFn(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/cancel`, {
@@ -338,9 +343,9 @@ async function executeStopSequence() {
     }
   })();
 
+  // ─── Step 2b: Azure Pipelines cancel ─────────────────────────────────────────
   const step2b = (async () => {
     try {
-      // if (!process.env.TF_BUILD) return;
       console.log("[stop] [2b] Azure Pipelines API cancel…");
       const org = process.env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI;
       const proj = process.env.SYSTEM_TEAMPROJECT;
@@ -352,7 +357,7 @@ async function executeStopSequence() {
       }
       const fetchFn = _getFetch();
       if (!fetchFn) {
-        console.warn("[stop] [2b] fetch not available (Node < 18), skipping.");
+        console.warn("[stop] [2b] fetch not available, skipping.");
         return;
       }
       const basic = Buffer.from(`:${tok}`).toString("base64");
@@ -367,10 +372,10 @@ async function executeStopSequence() {
     }
   })();
 
+  // ─── Step 3: Cgroup v2 kill ───────────────────────────────────────────────────
   const step3 = (async () => {
     try {
       console.log("[stop] [3] Cgroup kill…");
-      const fs = require("fs");
       const cgroupContent = fs.readFileSync("/proc/self/cgroup", "utf8");
       const cgroupLine = cgroupContent
         .split("\n")
@@ -386,7 +391,7 @@ async function executeStopSequence() {
         .filter(Boolean)
         .map(Number)
         .filter((p) => p !== process.pid);
-      console.log(`[stop] [3] Cgroup PIDs to kill: ${pids.join(", ") || "(none)"}`);
+      console.log(`[stop] [3] Killing PIDs: ${pids.join(", ") || "(none)"}`);
       for (const pid of pids) {
         try {
           process.kill(pid, "SIGKILL");
@@ -399,21 +404,21 @@ async function executeStopSequence() {
     }
   })();
 
+  // ─── Step 4: Process group kill ──────────────────────────────────────────────
   const step4 = (async () => {
     try {
       console.log("[stop] [4] Process group kill…");
-      const { execSync } = require("child_process");
       const pgidRaw = execSync(`ps -o pgid= -p ${process.pid}`).toString().trim();
       const pgid = parseInt(pgidRaw, 10);
-      if (!Number.isFinite(pgid) || pgid <= 0) throw new Error(`Could not parse PGID: "${pgidRaw}"`);
-      console.log(`[stop] [4] Sending SIGTERM to PGID ${pgid}…`);
+      if (!Number.isFinite(pgid) || pgid <= 0) throw new Error(`Bad PGID: "${pgidRaw}"`);
+      console.log(`[stop] [4] SIGTERM → PGID ${pgid}`);
       try {
         process.kill(-pgid, "SIGTERM");
       } catch {
         /* gone */
       }
-      await new Promise((r) => setTimeout(r, 2_000));
-      console.log(`[stop] [4] Sending SIGKILL to PGID ${pgid}…`);
+      await new Promise((r) => setTimeout(r, 1_000)); // giảm xuống 1s thay vì 2s
+      console.log(`[stop] [4] SIGKILL → PGID ${pgid}`);
       try {
         process.kill(-pgid, "SIGKILL");
       } catch {
@@ -424,7 +429,8 @@ async function executeStopSequence() {
     }
   })();
 
-  // await Promise.allSettled([step1, step2a, step2b, step3, step4]);
+  // ─── Đợi tất cả hoàn thành rồi mới exit ─────────────────────────────────────
+  await Promise.allSettled([step1, step2a, step2b, step3, step4]);
 
   console.log("[stop] ==== STOP SEQUENCE COMPLETE — exiting ====");
   process.exit(0);
