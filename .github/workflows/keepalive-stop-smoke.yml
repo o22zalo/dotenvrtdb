@@ -60,10 +60,10 @@ jobs:
           sleep 5
           test -f keepalive-wrapper.pid
 
-      - name: Change owner to trigger stop
-        run: |
-          sleep 3
-          STOP_RUNNER_ID="stop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" node cli.js runner set-stoprunnerid
+      # - name: Change owner to trigger stop
+      #   run: |
+      #     sleep 3
+      #     STOP_RUNNER_ID="stop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" node cli.js runner set-stoprunnerid
 
       - name: Assert keepalive stops quickly
         run: |
