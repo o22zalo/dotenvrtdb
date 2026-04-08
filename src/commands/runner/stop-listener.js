@@ -194,6 +194,7 @@ function _connectSSE(url, runnerId) {
     let lastEventType = "";
 
     res.on("data", (chunk) => {
+      resetHeartbeat(); // THÊM DÒNG NÀY — reset watchdog mỗi lần có data
       if (_stopSequenceTriggered) return;
 
       resetHeartbeat(); // FIX: reset watchdog on every chunk — proves connection is alive
@@ -259,20 +260,19 @@ function _connectSSE(url, runnerId) {
     });
   });
 
-  // FIX: socket-level keepalive so TCP layer sends keepalive probes
-  // → prevents silent drops on cloud environments (GitHub Actions, Firebase, etc.)
-  req.on("socket", (socket) => {
-    socket.setKeepAlive(true, 15_000); // send TCP keepalive every 15s
-    socket.setTimeout(0); // disable default socket timeout
-  });
-
   req.on("error", (err) => {
     clearTimeout(heartbeatTimer);
     if (_stopSequenceTriggered) return;
     console.warn(`[stop-listener] SSE request error: ${err.message} — retrying in ${reconnectDelay / 1000} s`);
     setTimeout(() => _connectSSE(url, runnerId), reconnectDelay);
   });
-
+  // THÊM VÀO — ngay trước req.end();
+  // FIX: socket-level keepalive so TCP layer sends keepalive probes
+  // → prevents silent drops on cloud environments (GitHub Actions, Firebase, etc.)
+  req.on("socket", (socket) => {
+    socket.setKeepAlive(true, 15_000);
+    socket.setTimeout(0);
+  });
   req.end();
   activeReq = req; // FIX: keep reference so heartbeat watchdog can destroy it
 }
