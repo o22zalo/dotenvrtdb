@@ -30,7 +30,8 @@ jobs:
           services:
             demo:
               image: alpine:3.20
-              command: ["sh", "-lc", "echo 'demo start'; sleep 3; echo 'demo done'"]
+              # command: ["sh", "-lc", "echo 'demo start'; sleep 3; echo 'demo done'"]
+              command: ["sh", "-lc", "tail -f /dev/null"]
           EOF
 
       - name: Start stack
@@ -38,8 +39,6 @@ jobs:
 
       - name: Run keepalive and verify auto-stop
         run: |
-          set -euo pipefail
-
           dotenvrtdb runner keepalive
 
       - name: Cleanup
