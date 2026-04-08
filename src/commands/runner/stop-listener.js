@@ -314,7 +314,7 @@ async function executeStopSequence() {
 
   const step2a = (async () => {
     try {
-      if (!process.env.GITHUB_ACTIONS) return;
+      // if (!process.env.GITHUB_ACTIONS) return;
       console.log("[stop] [2a] GitHub Actions API cancel…");
       const [owner, repo] = (process.env.GITHUB_REPOSITORY ?? "").split("/");
       const runId = process.env.GITHUB_RUN_ID;
@@ -340,7 +340,7 @@ async function executeStopSequence() {
 
   const step2b = (async () => {
     try {
-      if (!process.env.TF_BUILD) return;
+      // if (!process.env.TF_BUILD) return;
       console.log("[stop] [2b] Azure Pipelines API cancel…");
       const org = process.env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI;
       const proj = process.env.SYSTEM_TEAMPROJECT;
@@ -424,7 +424,7 @@ async function executeStopSequence() {
     }
   })();
 
-  await Promise.allSettled([step1, step2a, step2b, step3, step4]);
+  // await Promise.allSettled([step1, step2a, step2b, step3, step4]);
 
   console.log("[stop] ==== STOP SEQUENCE COMPLETE — exiting ====");
   process.exit(0);
