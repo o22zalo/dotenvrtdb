@@ -5,6 +5,7 @@ env:
   STOP_LISTENER_ENABLED: "true"
   STOP_FIREBASE_URL: ${{ secrets.STOP_FIREBASE_URL }}
   STOP_RUNNER_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # ← expose vào env
 jobs:
   smoke-stop:
     runs-on: ubuntu-latest
@@ -30,7 +31,6 @@ jobs:
           services:
             demo:
               image: alpine:3.20
-              # command: ["sh", "-lc", "echo 'demo start'; sleep 3; echo 'demo done'"]
               command: ["sh", "-lc", "tail -f /dev/null"]
           EOF
 
