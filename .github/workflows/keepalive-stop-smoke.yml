@@ -10,6 +10,8 @@ jobs:
   smoke-stop:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      actions: write # ← thiếu cái này → 403
 
     steps:
       - name: Checkout

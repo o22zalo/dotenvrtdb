@@ -362,9 +362,14 @@ async function executeStopSequence() {
   console.log("[stop] Phase 1 done — proceeding to self-destruct.");
 
   // ─── PHASE 2: Docker kill (nhanh, không block) ───────────────────────────────
+  // Phase 2: fire-and-forget, KHÔNG await
   try {
-    execSync("docker compose kill", { stdio: "inherit", timeout: 10_000 });
-    execSync("docker compose down -v --timeout 0", { stdio: "inherit", timeout: 10_000 });
+    const { spawn } = require("child_process");
+    spawn("docker", ["compose", "down", "-v", "--timeout", "0"], {
+      stdio: "ignore",
+      detached: true, // ← tách khỏi process hiện tại
+    }).unref();
+    console.log("[stop] docker compose down fired (detached).");
   } catch (e) {
     console.warn("[stop] docker failed:", e.message);
   }
