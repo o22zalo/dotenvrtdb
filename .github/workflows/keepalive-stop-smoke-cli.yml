@@ -1,0 +1,93 @@
+# Path:.github/workflows/keepalive-stop-smoke.yml
+name: keepalive stop smoke
+on:
+  workflow_dispatch:
+env:
+  STOP_LISTENER_ENABLED: "true"
+  STOP_FIREBASE_URL: ${{ secrets.STOP_FIREBASE_URL }}
+  STOP_RUNNER_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+  STOP_POLL_INTERVAL_MS: "3000"
+  STOP_VALUE_POLL_INTERVAL_MS: "2000"
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  smoke-stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: Install dependencies from repository
+        run: npm install -g @tolaptrinhdh61/dotenvrtdb
+
+      - name: Claim initial runner ownership
+        run: dotenvrtdb runner set-stoprunnerid
+
+      - name: Create short-lived docker compose stack
+        run: |
+          cat > docker-compose.yml <<'STACK'
+          services:
+            demo:
+              image: alpine:3.20
+              command:
+                - sh
+                - -lc
+                - |
+                  i=0
+                  while true; do
+                    i=$((i + 1))
+                    echo "demo tick ${i}"
+                    sleep 1
+                  done
+          STACK
+
+      - name: Start stack
+        run: docker compose -f docker-compose.yml up -d
+
+      - name: keepalive
+        run: dotenvrtdb runner keepalive
+
+      # - name: Start keepalive in background
+      #   run: |
+      #     rm -f keepalive.log keepalive.exitcode keepalive-wrapper.pid
+      #     bash -lc 'set +e; node cli.js runner keepalive --interval 2 --tail 20 > keepalive.log 2>&1; echo $? > keepalive.exitcode' &
+      #     echo $! > keepalive-wrapper.pid
+      #     sleep 5
+      #     test -f keepalive-wrapper.pid
+
+      # - name: Change owner to trigger stop
+      #   run: |
+      #     sleep 3
+      #     STOP_RUNNER_ID="stop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" node cli.js runner set-stoprunnerid
+
+      # - name: Assert keepalive stops quickly
+      #   run: |
+      #     deadline=$((SECONDS + 20))
+      #     while [ ! -f keepalive.exitcode ] && [ $SECONDS -lt $deadline ]; do
+      #       sleep 1
+      #     done
+
+      #     echo '--- keepalive.log ---'
+      #     test -f keepalive.log && cat keepalive.log || true
+
+      #     if [ ! -f keepalive.exitcode ]; then
+      #       echo 'keepalive did not stop within 20 seconds'
+      #       exit 1
+      #     fi
+
+      #     exit_code="$(cat keepalive.exitcode)"
+      #     echo "keepalive exit code=${exit_code}"
+      #     test "${exit_code}" = "130"
+      #     grep -E 'Stop requested\.|Aborting in-flight docker command\.|source=(poll|sse)' keepalive.log
+
+      - name: Cleanup
+        if: ${{ always() }}
+        run: docker compose -f docker-compose.yml down -v --remove-orphans
