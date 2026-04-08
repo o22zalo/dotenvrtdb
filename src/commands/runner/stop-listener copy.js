@@ -17,14 +17,6 @@
 // ─── Guard: stop sequence fires only once ─────────────────────────────────────
 let _stopSequenceTriggered = false;
 
-// ─── FIX Bug 2: module-level reconnect guard ──────────────────────────────────
-// Prevents SSE connection accumulation.
-// Per-call local `reconnectScheduled` was ineffective across recursive _connectSSE
-// calls — each new call created its own fresh false-flag, allowing double (then
-// quadruple, etc.) connections to accumulate every heartbeat cycle.
-// One module-level timer ensures only ONE reconnect is ever pending at a time.
-let _reconnectTimer = null;
-
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 async function startStopListener(options = {}) {
@@ -133,6 +125,7 @@ function _connectSSE(url, runnerId) {
   }
 
   const reconnectDelay = Math.max(1000, parseInt(process.env.STOP_POLL_INTERVAL_MS ?? "5000", 10) || 5000);
+  // FIX: heartbeat timeout — if no chunks arrive within this window, assume connection dead
   const heartbeatMs = Math.max(15000, parseInt(process.env.STOP_HEARTBEAT_MS ?? "45000", 10) || 45000);
 
   const options = {
@@ -142,6 +135,7 @@ function _connectSSE(url, runnerId) {
     headers: {
       Accept: "text/event-stream",
       "Cache-Control": "no-cache",
+      // FIX: tell server to keep connection alive and not compress
       Connection: "keep-alive",
       "Accept-Encoding": "identity",
     },
@@ -149,24 +143,17 @@ function _connectSSE(url, runnerId) {
 
   let heartbeatTimer = null;
   let activeReq = null;
+  let reconnectScheduled = false;
 
-  // ── FIX Bug 2: unified scheduleReconnect using module-level _reconnectTimer ──
-  // Previously: local `reconnectScheduled` flag was reset to false on every new
-  // _connectSSE() call, so when heartbeat fired and triggered BOTH req.on("error")
-  // AND res.on("close"), each saw reconnectScheduled=false and both scheduled a new
-  // _connectSSE → connection count doubled each cycle (1→2→4→8…).
-  // Now: module-level _reconnectTimer is shared across all invocations — only ONE
-  // reconnect can be pending regardless of how many events fire simultaneously.
   const scheduleReconnect = (reason) => {
     clearTimeout(heartbeatTimer);
-    if (_stopSequenceTriggered || _reconnectTimer) return;
+    if (_stopSequenceTriggered || reconnectScheduled) return;
+    reconnectScheduled = true;
     console.warn(`[stop-listener] SSE ${reason}, reconnecting in ${reconnectDelay / 1000} s…`);
-    _reconnectTimer = setTimeout(() => {
-      _reconnectTimer = null;
-      _connectSSE(url, runnerId);
-    }, reconnectDelay);
+    setTimeout(() => _connectSSE(url, runnerId), reconnectDelay);
   };
 
+  // FIX: heartbeat watchdog — reset on every data chunk; fire → force-destroy connection
   const resetHeartbeat = () => {
     clearTimeout(heartbeatTimer);
     heartbeatTimer = setTimeout(() => {
@@ -195,33 +182,31 @@ function _connectSSE(url, runnerId) {
       clearTimeout(heartbeatTimer);
       console.error(`[stop-listener] SSE endpoint returned HTTP ${res.statusCode}. ` + "Check STOP_FIREBASE_URL / auth secret. Retrying in 30 s…");
       res.resume();
-      // Use _reconnectTimer guard here too — 4xx retry also goes through the same guard
-      if (!_reconnectTimer) {
-        _reconnectTimer = setTimeout(() => {
-          _reconnectTimer = null;
-          _connectSSE(url, runnerId);
-        }, 30_000);
-      }
+      setTimeout(() => _connectSSE(url, runnerId), 30_000);
       return;
     }
 
     console.log(`[stop-listener] SSE connected (HTTP ${res.statusCode}). Heartbeat: ${heartbeatMs / 1000}s`);
-    resetHeartbeat();
+    resetHeartbeat(); // FIX: start watchdog immediately after connect
 
     let buffer = "";
+    // FIX: track last event type to skip non-put events (keep-alive, cancel)
     let lastEventType = "";
 
     res.on("data", (chunk) => {
-      resetHeartbeat();
+      resetHeartbeat(); // THÊM DÒNG NÀY — reset watchdog mỗi lần có data
       if (_stopSequenceTriggered) return;
+
+      resetHeartbeat(); // FIX: reset watchdog on every chunk — proves connection is alive
 
       buffer += chunk.toString();
       const lines = buffer.split("\n");
-      buffer = lines.pop();
+      buffer = lines.pop(); // keep incomplete trailing line
 
       for (const line of lines) {
-        const trimmed = line.trimEnd();
+        const trimmed = line.trimEnd(); // FIX: handle \r\n line endings from Firebase
 
+        // FIX: track event type — only process "put" or "patch" data lines
         if (trimmed.startsWith("event:")) {
           lastEventType = trimmed.replace(/^event:\s*/, "").trim();
           continue;
@@ -229,12 +214,13 @@ function _connectSSE(url, runnerId) {
 
         if (!trimmed.startsWith("data:")) continue;
 
+        // FIX: skip non-data events (keep-alive sends "event: cancel" or "event: keep-alive")
         if (lastEventType && lastEventType !== "put" && lastEventType !== "patch") {
           console.log(`[stop-listener] SSE skipping event type: "${lastEventType}"`);
           lastEventType = "";
           continue;
         }
-        lastEventType = "";
+        lastEventType = ""; // reset after consuming
 
         try {
           const raw = trimmed.replace(/^data:\s*/, "");
@@ -244,7 +230,7 @@ function _connectSSE(url, runnerId) {
           const payload = JSON.parse(raw);
           const value = payload?.data;
 
-          console.log(`[stop-listener] SSE received value: ${JSON.stringify(value)}`);
+          console.log(`[stop-listener] SSE received value: ${JSON.stringify(value)}`); // FIX: always log received value
 
           if (value === null || value === undefined || value === "") continue;
 
@@ -253,23 +239,13 @@ function _connectSSE(url, runnerId) {
             if (!_stopSequenceTriggered) {
               _stopSequenceTriggered = true;
               clearTimeout(heartbeatTimer);
-              // FIX Bug 1: unref the SSE connection so it no longer keeps the
-              // event loop alive. Without this, after runKeepalive() returns (via
-              // the SIGTERM handler resolving stopPromise), the persistent SSE
-              // socket would keep Node alive indefinitely.
-              if (activeReq) {
-                try {
-                  activeReq.socket?.unref();
-                } catch {
-                  /* ignore */
-                }
-              }
               executeStopSequence(); // intentionally not awaited
             }
           } else {
             console.log(`[stop-listener] SSE value matches own ID — still owner.`);
           }
         } catch (e) {
+          // FIX: was silent catch {} — now warn with details for debugging
           console.warn(`[stop-listener] SSE parse error: ${e.message} | raw: ${trimmed.slice(0, 120)}`);
         }
       }
@@ -284,24 +260,21 @@ function _connectSSE(url, runnerId) {
     });
   });
 
-  // FIX Bug 2: req.on("error") now uses scheduleReconnect() instead of a raw
-  // setTimeout. Previously it bypassed the reconnectScheduled flag entirely,
-  // causing a second _connectSSE() to be scheduled whenever heartbeat destroyed
-  // the socket (which also triggered res.on("close") → scheduleReconnect).
   req.on("error", (err) => {
     clearTimeout(heartbeatTimer);
     if (_stopSequenceTriggered) return;
-    console.warn(`[stop-listener] SSE request error: ${err.message}`);
-    scheduleReconnect("request error");
+    console.warn(`[stop-listener] SSE request error: ${err.message} — retrying in ${reconnectDelay / 1000} s`);
+    setTimeout(() => _connectSSE(url, runnerId), reconnectDelay);
   });
-
+  // THÊM VÀO — ngay trước req.end();
+  // FIX: socket-level keepalive so TCP layer sends keepalive probes
+  // → prevents silent drops on cloud environments (GitHub Actions, Firebase, etc.)
   req.on("socket", (socket) => {
     socket.setKeepAlive(true, 15_000);
     socket.setTimeout(0);
   });
-
   req.end();
-  activeReq = req;
+  activeReq = req; // FIX: keep reference so heartbeat watchdog can destroy it
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -330,23 +303,10 @@ async function executeStopSequence() {
   const { execSync } = require("child_process");
   const fs = require("fs");
 
-  // ─── PHASE 1: Fire remote CI cancel — NO await ────────────────────────────
-  // FIX Bug 1: Previously we awaited Promise.race([..., setTimeout(8000)]) here.
-  // The GitHub cancel API call would succeed, GitHub Actions would respond by
-  // sending SIGTERM to our process. The SIGTERM handler in keepalive.js resolved
-  // stopPromise → runKeepalive() returned → process.off("SIGTERM") was called.
-  // Meanwhile executeStopSequence was stuck in the 8s await with no SIGTERM handler
-  // left. The event loop stayed alive (SSE socket + the 8s timer), so the process
-  // hung silently until eventually the 8s expired — but by then Phase 3b's
-  // process.kill(-pgid, SIGTERM) found no handler and killed the process abruptly.
-  //
-  // Fix: fire Phase 1 requests without awaiting them. Give them a minimal head
-  // start (300 ms) then proceed immediately to local self-destruct. The CI cancel
-  // is best-effort — the local kill is what actually terminates the process.
-  console.log("[stop] Phase 1 — remote cancel (fire-and-forget)…");
+  // ─── PHASE 1: Gửi cancel lên CI platform TRƯỚC (không tự kill) ───────────────
+  console.log("[stop] Phase 1 — remote cancel…");
 
-  // cancelGitHub — IIFE, starts immediately
-  (async () => {
+  const cancelGitHub = (async () => {
     try {
       const [owner, repo] = (process.env.GITHUB_REPOSITORY ?? "").split("/");
       const runId = process.env.GITHUB_RUN_ID;
@@ -363,7 +323,6 @@ async function executeStopSequence() {
       const res = await fetchFn(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/cancel`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" },
-        signal: AbortSignal.timeout ? AbortSignal.timeout(5_000) : undefined,
       });
       console.log("[stop] [2a] GitHub cancel status:", res.status);
     } catch (e) {
@@ -371,8 +330,7 @@ async function executeStopSequence() {
     }
   })();
 
-  // cancelAzure — IIFE, starts immediately
-  (async () => {
+  const cancelAzure = (async () => {
     try {
       const org = process.env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI;
       const proj = process.env.SYSTEM_TEAMPROJECT;
@@ -392,7 +350,6 @@ async function executeStopSequence() {
         method: "PATCH",
         headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/json" },
         body: JSON.stringify({ status: "cancelling" }),
-        signal: AbortSignal.timeout ? AbortSignal.timeout(5_000) : undefined,
       });
       console.log("[stop] [2b] Azure cancel status:", res.status);
     } catch (e) {
@@ -400,24 +357,24 @@ async function executeStopSequence() {
     }
   })();
 
-  // Minimal head start so the IIFEs above can at least initiate the HTTP
-  // handshake before we proceed to kill the process.
-  await new Promise((r) => setTimeout(r, 300));
-  console.log("[stop] Phase 1 fired. Proceeding to self-destruct.");
+  // Đợi cả 2 API xong (hoặc timeout 8s) trước khi tự kill
+  await Promise.race([Promise.allSettled([cancelGitHub, cancelAzure]), new Promise((r) => setTimeout(r, 8_000))]);
+  console.log("[stop] Phase 1 done — proceeding to self-destruct.");
 
-  // ─── PHASE 2: Docker kill (fire-and-forget, detached) ────────────────────
+  // ─── PHASE 2: Docker kill (nhanh, không block) ───────────────────────────────
+  // Phase 2: fire-and-forget, KHÔNG await
   try {
     const { spawn } = require("child_process");
     spawn("docker", ["compose", "down", "-v", "--timeout", "0"], {
       stdio: "ignore",
-      detached: true,
+      detached: true, // ← tách khỏi process hiện tại
     }).unref();
     console.log("[stop] docker compose down fired (detached).");
   } catch (e) {
     console.warn("[stop] docker failed:", e.message);
   }
 
-  // ─── PHASE 3: Kill all processes (self-destruct) ──────────────────────────
+  // ─── PHASE 3: Kill toàn bộ process (self-destruct) ───────────────────────────
   // 3a — cgroup v2
   try {
     console.log(`[stop] [3a] /proc/self/cgroup`);
