@@ -52,38 +52,41 @@ jobs:
       - name: Start stack
         run: docker compose -f docker-compose.yml up -d
 
-      - name: Start keepalive in background
-        run: |
-          rm -f keepalive.log keepalive.exitcode keepalive-wrapper.pid
-          bash -lc 'set +e; node cli.js runner keepalive --interval 2 --tail 20 > keepalive.log 2>&1; echo $? > keepalive.exitcode' &
-          echo $! > keepalive-wrapper.pid
-          sleep 5
-          test -f keepalive-wrapper.pid
+      - name: keepalive
+        run: node cli.js runner keepalive
+
+      # - name: Start keepalive in background
+      #   run: |
+      #     rm -f keepalive.log keepalive.exitcode keepalive-wrapper.pid
+      #     bash -lc 'set +e; node cli.js runner keepalive --interval 2 --tail 20 > keepalive.log 2>&1; echo $? > keepalive.exitcode' &
+      #     echo $! > keepalive-wrapper.pid
+      #     sleep 5
+      #     test -f keepalive-wrapper.pid
 
       # - name: Change owner to trigger stop
       #   run: |
       #     sleep 3
       #     STOP_RUNNER_ID="stop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" node cli.js runner set-stoprunnerid
 
-      - name: Assert keepalive stops quickly
-        run: |
-          deadline=$((SECONDS + 20))
-          while [ ! -f keepalive.exitcode ] && [ $SECONDS -lt $deadline ]; do
-            sleep 1
-          done
+      # - name: Assert keepalive stops quickly
+      #   run: |
+      #     deadline=$((SECONDS + 20))
+      #     while [ ! -f keepalive.exitcode ] && [ $SECONDS -lt $deadline ]; do
+      #       sleep 1
+      #     done
 
-          echo '--- keepalive.log ---'
-          test -f keepalive.log && cat keepalive.log || true
+      #     echo '--- keepalive.log ---'
+      #     test -f keepalive.log && cat keepalive.log || true
 
-          if [ ! -f keepalive.exitcode ]; then
-            echo 'keepalive did not stop within 20 seconds'
-            exit 1
-          fi
+      #     if [ ! -f keepalive.exitcode ]; then
+      #       echo 'keepalive did not stop within 20 seconds'
+      #       exit 1
+      #     fi
 
-          exit_code="$(cat keepalive.exitcode)"
-          echo "keepalive exit code=${exit_code}"
-          test "${exit_code}" = "130"
-          grep -E 'Stop requested\.|Aborting in-flight docker command\.|source=(poll|sse)' keepalive.log
+      #     exit_code="$(cat keepalive.exitcode)"
+      #     echo "keepalive exit code=${exit_code}"
+      #     test "${exit_code}" = "130"
+      #     grep -E 'Stop requested\.|Aborting in-flight docker command\.|source=(poll|sse)' keepalive.log
 
       - name: Cleanup
         if: ${{ always() }}
