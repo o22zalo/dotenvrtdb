@@ -26,7 +26,7 @@ jobs:
 
       - name: Create short-lived docker compose stack
         run: |
-          cat > docker-compose.keepalive-smoke.yml <<'EOF'
+          cat > docker-compose.yml <<'EOF'
           services:
             demo:
               image: alpine:3.20
@@ -34,7 +34,7 @@ jobs:
           EOF
 
       - name: Start stack
-        run: docker compose -f docker-compose.keepalive-smoke.yml up -d
+        run: docker compose -f docker-compose.yml up -d
 
       - name: Run keepalive and verify auto-stop
         run: |
@@ -44,4 +44,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: docker compose -f docker-compose.keepalive-smoke.yml down -v --remove-orphans
+        run: docker compose -f docker-compose.yml down -v --remove-orphans
