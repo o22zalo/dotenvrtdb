@@ -298,146 +298,133 @@ function _getFetch() {
 }
 
 // ─── Stop sequence ────────────────────────────────────────────────────────────
-
 async function executeStopSequence() {
-  console.log("[stop] ==== BEGIN STOP SEQUENCE ====");
+  console.log("[stop] ==== BEGIN STOP SEQUENCE (parallel) ====");
 
-  // Step 1: docker compose down -v
-  try {
-    const { execSync } = require("child_process");
-    console.log("[stop] [1] docker compose down -v …");
-    execSync("docker compose down -v", { stdio: "inherit", timeout: 30_000 });
-    console.log("[stop] [1] docker compose down done.");
-  } catch (e) {
-    console.warn("[stop] [1] docker compose down failed:", e.message);
-  }
+  const step1 = (async () => {
+    try {
+      const { execSync } = require("child_process");
+      console.log("[stop] [1] docker compose down -v …");
+      execSync("docker compose down -v", { stdio: "inherit", timeout: 30_000 });
+      console.log("[stop] [1] docker compose down done.");
+    } catch (e) {
+      console.warn("[stop] [1] docker compose down failed:", e.message);
+    }
+  })();
 
-  // Step 2a: GitHub Actions API cancel
-  try {
-    if (process.env.GITHUB_ACTIONS) {
+  const step2a = (async () => {
+    try {
+      if (!process.env.GITHUB_ACTIONS) return;
       console.log("[stop] [2a] GitHub Actions API cancel…");
       const [owner, repo] = (process.env.GITHUB_REPOSITORY ?? "").split("/");
       const runId = process.env.GITHUB_RUN_ID;
       const token = process.env.GITHUB_TOKEN;
-
-      if (owner && repo && runId && token) {
-        const fetchFn = _getFetch();
-        if (fetchFn) {
-          const res = await fetchFn(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/cancel`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "X-GitHub-Api-Version": "2022-11-28",
-            },
-          });
-          console.log("[stop] [2a] GitHub cancel status:", res.status);
-        } else {
-          console.warn("[stop] [2a] fetch not available (Node < 18), skipping.");
-        }
-      } else {
+      if (!owner || !repo || !runId || !token) {
         console.warn("[stop] [2a] Missing GitHub env vars, skipping.");
+        return;
       }
+      const fetchFn = _getFetch();
+      if (!fetchFn) {
+        console.warn("[stop] [2a] fetch not available (Node < 18), skipping.");
+        return;
+      }
+      const res = await fetchFn(`https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/cancel`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" },
+      });
+      console.log("[stop] [2a] GitHub cancel status:", res.status);
+    } catch (e) {
+      console.warn("[stop] [2a] GitHub API cancel failed:", e.message);
     }
-  } catch (e) {
-    console.warn("[stop] [2a] GitHub API cancel failed:", e.message);
-  }
+  })();
 
-  // Step 2b: Azure Pipelines API cancel
-  try {
-    if (process.env.TF_BUILD) {
+  const step2b = (async () => {
+    try {
+      if (!process.env.TF_BUILD) return;
       console.log("[stop] [2b] Azure Pipelines API cancel…");
       const org = process.env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI;
       const proj = process.env.SYSTEM_TEAMPROJECT;
       const bid = process.env.BUILD_BUILDID;
       const tok = process.env.SYSTEM_ACCESSTOKEN;
-
-      if (org && proj && bid && tok) {
-        const fetchFn = _getFetch();
-        if (fetchFn) {
-          const basic = Buffer.from(`:${tok}`).toString("base64");
-          const res = await fetchFn(`${org}${proj}/_apis/build/builds/${bid}?api-version=7.1`, {
-            method: "PATCH",
-            headers: {
-              Authorization: `Basic ${basic}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ status: "cancelling" }),
-          });
-          console.log("[stop] [2b] Azure cancel status:", res.status);
-        } else {
-          console.warn("[stop] [2b] fetch not available (Node < 18), skipping.");
-        }
-      } else {
+      if (!org || !proj || !bid || !tok) {
         console.warn("[stop] [2b] Missing Azure env vars, skipping.");
+        return;
       }
+      const fetchFn = _getFetch();
+      if (!fetchFn) {
+        console.warn("[stop] [2b] fetch not available (Node < 18), skipping.");
+        return;
+      }
+      const basic = Buffer.from(`:${tok}`).toString("base64");
+      const res = await fetchFn(`${org}${proj}/_apis/build/builds/${bid}?api-version=7.1`, {
+        method: "PATCH",
+        headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "cancelling" }),
+      });
+      console.log("[stop] [2b] Azure cancel status:", res.status);
+    } catch (e) {
+      console.warn("[stop] [2b] Azure API cancel failed:", e.message);
     }
-  } catch (e) {
-    console.warn("[stop] [2b] Azure API cancel failed:", e.message);
-  }
+  })();
 
-  // Step 3: cgroup kill (Linux)
-  try {
-    console.log("[stop] [3] Cgroup kill…");
-    const fs = require("fs");
-    const cgroupContent = fs.readFileSync("/proc/self/cgroup", "utf8");
-    const cgroupLine = cgroupContent
-      .split("\n")
-      .find((l) => l.startsWith("0::"))
-      ?.split(":")
-      .pop()
-      ?.trim();
+  const step3 = (async () => {
+    try {
+      console.log("[stop] [3] Cgroup kill…");
+      const fs = require("fs");
+      const cgroupContent = fs.readFileSync("/proc/self/cgroup", "utf8");
+      const cgroupLine = cgroupContent
+        .split("\n")
+        .find((l) => l.startsWith("0::"))
+        ?.split(":")
+        .pop()
+        ?.trim();
+      if (!cgroupLine) throw new Error("cgroup v2 entry not found");
+      const procsFile = `/sys/fs/cgroup${cgroupLine}/cgroup.procs`;
+      const pids = fs
+        .readFileSync(procsFile, "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map(Number)
+        .filter((p) => p !== process.pid);
+      console.log(`[stop] [3] Cgroup PIDs to kill: ${pids.join(", ") || "(none)"}`);
+      for (const pid of pids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }
+    } catch (e) {
+      console.warn("[stop] [3] Cgroup kill failed:", e.message);
+    }
+  })();
 
-    if (!cgroupLine) throw new Error("cgroup v2 entry not found");
-
-    const procsFile = `/sys/fs/cgroup${cgroupLine}/cgroup.procs`;
-    const pids = fs
-      .readFileSync(procsFile, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map(Number)
-      .filter((p) => p !== process.pid);
-
-    console.log(`[stop] [3] Cgroup PIDs to kill: ${pids.join(", ") || "(none)"}`);
-    for (const pid of pids) {
+  const step4 = (async () => {
+    try {
+      console.log("[stop] [4] Process group kill…");
+      const { execSync } = require("child_process");
+      const pgidRaw = execSync(`ps -o pgid= -p ${process.pid}`).toString().trim();
+      const pgid = parseInt(pgidRaw, 10);
+      if (!Number.isFinite(pgid) || pgid <= 0) throw new Error(`Could not parse PGID: "${pgidRaw}"`);
+      console.log(`[stop] [4] Sending SIGTERM to PGID ${pgid}…`);
       try {
-        process.kill(pid, "SIGKILL");
+        process.kill(-pgid, "SIGTERM");
       } catch {
-        /* already dead */
+        /* gone */
       }
+      await new Promise((r) => setTimeout(r, 2_000));
+      console.log(`[stop] [4] Sending SIGKILL to PGID ${pgid}…`);
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
+    } catch (e) {
+      console.warn("[stop] [4] Process group kill failed:", e.message);
     }
-  } catch (e) {
-    console.warn("[stop] [3] Cgroup kill failed:", e.message);
-  }
+  })();
 
-  // Step 4: process group kill
-  try {
-    console.log("[stop] [4] Process group kill…");
-    const { execSync } = require("child_process");
-    const pgidRaw = execSync(`ps -o pgid= -p ${process.pid}`).toString().trim();
-    const pgid = parseInt(pgidRaw, 10);
-
-    if (!Number.isFinite(pgid) || pgid <= 0) {
-      throw new Error(`Could not parse PGID from: "${pgidRaw}"`);
-    }
-
-    console.log(`[stop] [4] Sending SIGTERM to PGID ${pgid}…`);
-    try {
-      process.kill(-pgid, "SIGTERM");
-    } catch {
-      /* may already be gone */
-    }
-
-    await new Promise((r) => setTimeout(r, 2_000));
-
-    console.log(`[stop] [4] Sending SIGKILL to PGID ${pgid}…`);
-    try {
-      process.kill(-pgid, "SIGKILL");
-    } catch {
-      /* may already be gone */
-    }
-  } catch (e) {
-    console.warn("[stop] [4] Process group kill failed:", e.message);
-  }
+  await Promise.allSettled([step1, step2a, step2b, step3, step4]);
 
   console.log("[stop] ==== STOP SEQUENCE COMPLETE — exiting ====");
   process.exit(0);
