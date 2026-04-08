@@ -1,5 +1,5 @@
 # Path:.github/workflows/keepalive-stop-smoke.yml
-name: keepalive stop smoke
+name: keepalive-smoke
 on:
   workflow_dispatch:
 env:
@@ -17,13 +17,8 @@ jobs:
       actions: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
 
       - name: Install dependencies from repository
         run: npm ci

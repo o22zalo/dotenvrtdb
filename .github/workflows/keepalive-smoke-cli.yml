@@ -1,0 +1,55 @@
+# Path:.github/workflows/keepalive-stop-smoke.yml
+name: keepalive-smoke-cli
+on:
+  workflow_dispatch:
+env:
+  STOP_LISTENER_ENABLED: "true"
+  STOP_FIREBASE_URL: ${{ secrets.STOP_FIREBASE_URL }}
+  STOP_RUNNER_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+  STOP_POLL_INTERVAL_MS: "3000"
+  STOP_VALUE_POLL_INTERVAL_MS: "2000"
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+jobs:
+  smoke-stop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+
+      - name: Install dependencies from repository
+        run: npm install -g @tltdh61/dotenvrtdb
+
+      - name: Claim initial runner ownership
+        run: dotenvrtdb runner set-stoprunnerid
+
+      - name: Create short-lived docker compose stack
+        run: |
+          cat > docker-compose.yml <<'STACK'
+          services:
+            demo:
+              image: alpine:3.20
+              command:
+                - sh
+                - -lc
+                - |
+                  i=0
+                  while true; do
+                    i=$((i + 1))
+                    echo "demo tick $${i}"
+                    sleep 1
+                  done
+          STACK
+
+      - name: Start stack
+        run: docker compose -f docker-compose.yml up -d
+
+      - name: keepalive
+        run: dotenvrtdb runner keepalive
+
+      - name: Cleanup
+        if: ${{ always() }}
+        run: docker compose -f docker-compose.yml down -v --remove-orphans
