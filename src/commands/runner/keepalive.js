@@ -27,9 +27,8 @@ function printHelp() {
       "",
       "Options:",
       "  --interval, -i <seconds>    Log polling interval in seconds (default: 10)",
-      "  --service, -s <name>        docker compose service name (default: all services)",
+      "  --service, -s <name>        Filter containers by substring match on name (default: all containers)",
       "  --tail, -t <lines>          Number of tail lines to fetch on the FIRST cycle (default: 50)",
-      "  --compose-file <path>       docker compose file path (default: docker-compose.yml)",
       '  --label <text>              Prefix label for each cycle (default: "[keepalive]")',
       "  --help, -h                  Print this help",
     ].join("\n"),
@@ -102,60 +101,70 @@ function runDockerCommandCapture(args = [], hooks = {}) {
   });
 }
 
-async function checkContainerStatus({ composeFile, service, label, hooks = {} }) {
-  const psArgs = ["compose", "-f", composeFile, "ps"];
-  if (service) psArgs.push(service);
-
+/**
+ * Discover running containers via `docker ps`.
+ * Returns an array of { id, name } objects, optionally filtered by service substring.
+ * anyRunning is true when docker ps returns at least one container (before filtering).
+ */
+async function discoverContainers({ service, label, hooks = {} }) {
   let result;
   try {
-    result = await runDockerCommandCapture(psArgs, hooks);
+    result = await runDockerCommandCapture(["ps", "--format", "{{.ID}}\t{{.Names}}"], hooks);
   } catch (err) {
-    console.error(`${label} Warning: could not run docker compose ps: ${err && err.message ? err.message : String(err)}`);
-    return { anyRunning: true };
+    console.error(`${label} Warning: could not run docker ps: ${err && err.message ? err.message : String(err)}`);
+    return { containers: [], anyRunning: true };
   }
-
-  console.log("┄┄┄ Container Status ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
 
   if (result.code !== 0) {
     if (!(result.signal && (result.signal === "SIGTERM" || result.signal === "SIGINT"))) {
-      console.error(`${label} Warning: docker compose ps exited with code ${result.code}.`);
+      console.error(`${label} Warning: docker ps exited with code ${result.code}.`);
     }
-    return { anyRunning: true };
+    return { containers: [], anyRunning: true };
   }
 
-  const lines = result.stdout.split("\n");
-  const anyRunning = lines.some((line) => {
-    const trimmed = line.trim();
-    if (!trimmed || /^NAME\b/i.test(trimmed)) return false;
-    return /\bUp\b/.test(line);
-  });
+  const lines = result.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const anyRunning = lines.length > 0;
 
-  return { anyRunning };
+  const containers = lines
+    .map((line) => {
+      const [id, ...nameParts] = line.split("\t");
+      return { id: id.trim(), name: nameParts.join("\t").trim() };
+    })
+    .filter(({ id, name }) => id && name)
+    .filter(({ name }) => !service || name.includes(service));
+
+  return { containers, anyRunning };
 }
 
-function detectMissingCompose(message = "") {
-  const text = `${message || ""}`.toLowerCase();
-  return text.includes("not a docker command") || text.includes('unknown command "compose"') || text.includes("docker-compose is not installed");
-}
+/**
+ * Fetch logs for a single container and stream to stdout.
+ * Returns { ok, id, name } on completion.
+ */
+async function fetchContainerLogs({ id, name, since, tail, label, hooks = {} }) {
+  const args = ["logs"];
+  if (since) {
+    args.push(`--since=${since}`);
+  }
+  args.push(`--tail=${tail}`);
+  args.push(id);
 
-async function ensureDockerComposeAvailable() {
   try {
-    const res = await runDockerCommand(["compose", "version"]);
-    if (res.code === 0) return { ok: true };
+    const result = await runDockerCommand(args, hooks);
 
-    const combined = `${res.stdout}\n${res.stderr}`;
-    if (detectMissingCompose(combined)) {
-      return { ok: false, fatal: true, message: "docker compose is not installed or unavailable. Please install Docker Compose v2." };
+    if (result.code !== 0 && !(result.signal && (result.signal === "SIGTERM" || result.signal === "SIGINT"))) {
+      console.error(`${label} Warning: docker logs for ${name} (${id}) exited with code ${result.code}.`);
     }
 
-    return { ok: true };
+    return { ok: true, id, name };
   } catch (err) {
     if (err && err.code === "ENOENT") {
-      return { ok: false, fatal: true, message: "docker command not found. Please install Docker Desktop/Engine with docker compose." };
+      throw err; // propagate — docker missing is fatal
     }
-    return { ok: false, fatal: true, message: err && err.message ? err.message : String(err) };
+    console.warn(`${label} Warning: failed to fetch logs for ${name} (${id}): ${err && err.message ? err.message : String(err)}`);
+    return { ok: false, id, name };
   }
 }
 
@@ -208,11 +217,10 @@ async function runKeepalive(rawArgv = []) {
       s: "service",
       t: "tail",
     },
-    string: ["service", "compose-file", "label"],
+    string: ["service", "label"],
     default: {
       interval: 10,
       tail: 50,
-      "compose-file": "docker-compose.yml",
       label: "[keepalive]",
     },
   });
@@ -225,17 +233,11 @@ async function runKeepalive(rawArgv = []) {
   const interval = parsePositiveInteger(argv.interval, 10);
   const tail = parsePositiveInteger(argv.tail, 50);
   const service = typeof argv.service === "string" ? argv.service.trim() : "";
-  const composeFile = typeof argv["compose-file"] === "string" && argv["compose-file"].trim() ? argv["compose-file"].trim() : "docker-compose.yml";
   const label = typeof argv.label === "string" && argv.label.trim() ? argv.label.trim() : "[keepalive]";
-
-  const availability = await ensureDockerComposeAvailable();
-  if (!availability.ok && availability.fatal) {
-    console.error(`${label} ${availability.message}`);
-    return 1;
-  }
 
   console.log(`${label} Started. Press Ctrl+C to stop. Interval: ${interval}s`);
   console.log(`${label} Start timestamp: ${formatTimestamp()}`);
+  if (service) console.log(`${label} Filtering containers by name substring: "${service}"`);
 
   let cycle = 0;
   let timer = null;
@@ -354,66 +356,89 @@ async function runKeepalive(rawArgv = []) {
     console.log(`${label} ${headerTime} | Cycle #${cycle}`);
     console.log("─────────────────────────────────────────");
 
-    const cmdArgs = ["compose", "-f", composeFile, "logs"];
-    if (cycleStartedAt === null) {
-      cmdArgs.push(`--tail=${tail}`);
-    } else {
-      cmdArgs.push(`--since=${cycleStartedAt}`);
-      cmdArgs.push(`--tail=${tail}`);
-    }
-    if (service) cmdArgs.push(service);
-
     try {
       if (stopRequested || stopFromSharedState()) return;
 
-      let logsOk = true;
+      // ── 1. Discover running containers ──────────────────────────────────────
+      let containers = [];
+      let anyRunning = false;
+
       try {
-        const result = await runDockerCommand(cmdArgs, {
-          onStart: registerActiveDocker,
-          onClose: clearActiveDocker,
+        const discovery = await discoverContainers({
+          service,
+          label,
+          hooks: { onStart: registerActiveDocker, onClose: clearActiveDocker },
         });
-
-        if (stopRequested || isStopRequested()) {
-          console.log(`${label} docker compose logs interrupted because stop was requested.`);
-          return;
-        }
-
-        if (result.code !== 0) {
-          console.error(`${label} Warning: docker compose logs exited with code ${result.code}.`);
-        }
+        containers = discovery.containers;
+        anyRunning = discovery.anyRunning;
       } catch (err) {
         if (stopRequested || isStopRequested()) {
-          console.log(`${label} docker compose logs aborted after stop request.`);
+          console.log(`${label} docker ps aborted after stop request.`);
           return;
         }
-
         if (err && err.code === "ENOENT") {
           console.error(`${label} docker command not found. Please install Docker.`);
           stopWithCode(1, `${label} Stopping because docker command is unavailable.`);
-          logsOk = false;
-        } else {
-          console.error(`${label} Warning: failed to execute docker compose logs: ${err && err.message ? err.message : String(err)}`);
+          return;
+        }
+        console.error(`${label} Warning: docker ps failed: ${err && err.message ? err.message : String(err)}`);
+        // treat as still running so we don't exit prematurely
+        anyRunning = true;
+      }
+
+      if (stopRequested || stopFromSharedState()) return;
+
+      // ── 2. Fetch logs for each container in parallel ─────────────────────────
+      if (containers.length === 0 && anyRunning) {
+        console.log(`${label} No containers matched${service ? ` filter "${service}"` : ""}. Skipping log fetch.`);
+      } else if (containers.length > 0) {
+        console.log(`${label} Fetching logs for ${containers.length} container(s)...`);
+
+        const logTasks = containers.map(({ id, name }) =>
+          fetchContainerLogs({
+            id,
+            name,
+            since: cycleStartedAt || null,
+            tail,
+            label,
+            hooks: { onStart: registerActiveDocker, onClose: clearActiveDocker },
+          }).catch((err) => {
+            // ENOENT (docker missing) — propagate as a rejected result so allSettled captures it
+            return Promise.reject(err);
+          }),
+        );
+
+        const results = await Promise.allSettled(logTasks);
+
+        for (const result of results) {
+          if (result.status === "rejected") {
+            const err = result.reason;
+            if (stopRequested || isStopRequested()) break;
+            if (err && err.code === "ENOENT") {
+              console.error(`${label} docker command not found. Please install Docker.`);
+              stopWithCode(1, `${label} Stopping because docker command is unavailable.`);
+              return;
+            }
+            console.warn(`${label} Warning: unexpected error fetching container logs: ${err && err.message ? err.message : String(err)}`);
+          }
+        }
+
+        if (stopRequested || isStopRequested()) {
+          console.log(`${label} Log fetch interrupted because stop was requested.`);
+          return;
         }
       }
 
       if (stopRequested || stopFromSharedState()) return;
 
-      if (logsOk) {
-        const { anyRunning } = await checkContainerStatus({
-          composeFile,
-          service,
-          label,
-          hooks: {
-            onStart: registerActiveDocker,
-            onClose: clearActiveDocker,
-          },
-        });
+      // ── 3. Print container status summary ────────────────────────────────────
+      console.log("┄┄┄ Container Status ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+      console.log(`${label} Running containers: ${anyRunning ? `yes (${containers.length} matched)` : "none"}`);
 
-        if (stopRequested || stopFromSharedState()) return;
+      if (stopRequested || stopFromSharedState()) return;
 
-        if (!anyRunning) {
-          stopWithCode(0, `${label} All containers have stopped. Exiting. Total cycles: ${cycle}`);
-        }
+      if (!anyRunning) {
+        stopWithCode(0, `${label} All containers have stopped. Exiting. Total cycles: ${cycle}`);
       }
     } finally {
       cycleStartedAt = toDockerSince(thisCycleStart);
@@ -433,10 +458,7 @@ async function runKeepalive(rawArgv = []) {
 
   const exitCode = await stopPromise;
 
-  await Promise.race([
-    Promise.resolve(currentCyclePromise).catch(() => undefined),
-    wait(1500),
-  ]);
+  await Promise.race([Promise.resolve(currentCyclePromise).catch(() => undefined), wait(1500)]);
 
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
