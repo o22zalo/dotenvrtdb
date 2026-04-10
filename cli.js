@@ -23,10 +23,7 @@ function formatErrorMessage(context = "unknown", err) {
   const code = err && err.code ? ` | code=${err.code}` : "";
   const syscall = err && err.syscall ? ` | syscall=${err.syscall}` : "";
   const filePath = err && err.path ? ` | path=${err.path}` : "";
-  const cause =
-    err && err.cause
-      ? ` | cause=${err.cause && err.cause.message ? err.cause.message : String(err.cause)}`
-      : "";
+  const cause = err && err.cause ? ` | cause=${err.cause && err.cause.message ? err.cause.message : String(err.cause)}` : "";
   return `[${context}] ${message}${code}${syscall}${filePath}${cause}`;
 }
 
@@ -186,11 +183,16 @@ const rtdbUtils = (() => {
   const pullFrom = async () => {
     // Lấy dữ liệu từ rtdbUrl, trả về objVar
     try {
-      if (!rtdbUrl) {
+      let finalUrl = rtdbUrl;
+      if ((finalUrl + "").startsWith("http") !== true) {
+        finalUrl = resolveRtdbUrlFromObjVar(rtdbUrl, process.env);
+      }
+
+      if (!finalUrl) {
         console.error(`[rtdb] Missing url. Provide --eUrl=https://...`);
         return {}; //objVar;
       }
-      const res = await fetch(rtdbUrl, { method: "GET" });
+      const res = await fetch(finalUrl, { method: "GET" });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         console.error(`[rtdb] GET failed: HTTP ${res.status} ${res.statusText} ${text ? `- ${text}` : ""}`);
@@ -521,212 +523,214 @@ async function main() {
       rtdbUtils.setUrl(argv.eUrl);
     }
 
-  const executePush = async () => {
-    /**
-     * Nếu tồn tại argv.push, và có url thì thực hiện và trả về true, ngược lại false
-     */
-    if (!argv.push) return false;
-    if (!argv.eUrl) {
-      console.error(`Missing --eUrl=<url>. This is required for --push.`);
-      logSyncStatus("push", { status: "failed", file: "-", varCount: 0, message: "missing --eUrl" });
-      return true; // đã "xử lý" case push nhưng lỗi => vẫn kết thúc luồng
-    }
-    const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
-    if (!ok) {
-      logSyncStatus("push", { status: "failed", file: envPath || "-", varCount: 0, message: "missing/invalid -e path" });
-      return true;
-    }
+    const executePush = async () => {
+      /**
+       * Nếu tồn tại argv.push, và có url thì thực hiện và trả về true, ngược lại false
+       */
+      if (!argv.push) return false;
+      if (!argv.eUrl) {
+        console.error(`Missing --eUrl=<url>. This is required for --push.`);
+        logSyncStatus("push", { status: "failed", file: "-", varCount: 0, message: "missing --eUrl" });
+        return true; // đã "xử lý" case push nhưng lỗi => vẫn kết thúc luồng
+      }
+      const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
+      if (!ok) {
+        logSyncStatus("push", { status: "failed", file: envPath || "-", varCount: 0, message: "missing/invalid -e path" });
+        return true;
+      }
 
-    const pushResult = await rtdbUtils.envPathPushTo(envPath);
-    if (!pushResult.ok) {
-      logSyncStatus("push", {
-        status: "failed",
-        file: pushResult.file || envPath,
-        varCount: pushResult.varCount || 0,
-        message: pushResult.reason || "unable to push env vars to RTDB",
-      });
-      process.exit(1);
-    }
-    logSyncStatus("push", { status: "success", file: pushResult.file || envPath, varCount: pushResult.varCount || 0 });
-    return true;
-  };
-
-  const executePull = async () => {
-    /**
-     * Nếu tồn tại argv.pull, và có url thì thực hiện và trả về true, ngược lại false
-     */
-    if (!argv.pull) return false;
-    if (!argv.eUrl) {
-      console.error(`Missing --eUrl=<url>. This is required for --pull.`);
-      logSyncStatus("pull", { status: "failed", file: "-", varCount: 0, message: "missing --eUrl" });
-      return true; // đã "xử lý" case pull nhưng lỗi => vẫn kết thúc luồng
-    }
-    let envPath = "";
-    if (argv.e) {
-      envPath = typeof argv.e === "string" ? argv.e : argv.e[0];
-    }
-    envPath = `${envPath || ""}`.trim();
-    if (!envPath) {
-      logSyncStatus("pull", { status: "failed", file: "-", varCount: 0, message: "missing -e <path>" });
-      return true;
-    }
-    if (!fs.existsSync(envPath)) {
-      try {
-        const absPath = path.resolve(envPath);
-        fs.mkdirSync(path.dirname(absPath), { recursive: true });
-        fs.writeFileSync(absPath, "", "utf8");
-      } catch (err) {
-        logSyncStatus("pull", {
+      const pushResult = await rtdbUtils.envPathPushTo(envPath);
+      if (!pushResult.ok) {
+        logSyncStatus("push", {
           status: "failed",
-          file: envPath,
-          varCount: 0,
-          message: formatErrorMessage("pull create env file failed", err),
+          file: pushResult.file || envPath,
+          varCount: pushResult.varCount || 0,
+          message: pushResult.reason || "unable to push env vars to RTDB",
         });
         process.exit(1);
       }
-    }
-
-    const objVar = {
-      ...rtdbUtils.getDefaultRtdbEnv(),
-      ...(await rtdbUtils.pullFrom()),
+      logSyncStatus("push", { status: "success", file: pushResult.file || envPath, varCount: pushResult.varCount || 0 });
+      return true;
     };
-    const pullVarCount = Object.keys(objVar || {}).length;
 
-    try {
-      const out = rtdbUtils.serializeEnv(objVar);
-      fs.writeFileSync(envPath, out, "utf8");
-      logSyncStatus("pull", { status: "success", file: envPath, varCount: pullVarCount });
-    } catch (err) {
-      console.error(`[pull] write error: ${err && err.message ? err.message : err}`);
-      logSyncStatus("pull", { status: "failed", file: envPath, varCount: pullVarCount, message: "write file failed" });
-      process.exit(1);
-    }
-    return true;
-  };
-
-  const executeWriteFileRaw = async () => {
-    /**
-     * Nếu tồn tại argv.writefileraw thì đọc --var từ -e <path> và ghi thẳng ra file.
-     */
-    if (!argv.writefileraw) return false;
-
-    const outPaths = (Array.isArray(argv.writefileraw) ? argv.writefileraw : [argv.writefileraw])
-      .map((v) => (typeof v === "string" ? v.trim() : ""))
-      .filter(Boolean);
-    if (outPaths.length === 0) {
-      console.error(`Missing --writefileraw=<path>.`);
-      return true;
-    }
-
-    const explicitRawVars = (Array.isArray(argv.varraw || argv.varRaw) ? argv.varraw || argv.varRaw : [argv.varraw || argv.varRaw])
-      .map((v) => (typeof v === "string" ? v.trim() : ""))
-      .filter(Boolean);
-
-    const varNames = [];
-    if (explicitRawVars.length > 0) {
-      if (explicitRawVars.length !== outPaths.length) {
-        console.error(`--varraw must have the same number of entries as --writefileraw.`);
+    const executePull = async () => {
+      /**
+       * Nếu tồn tại argv.pull, và có url thì thực hiện và trả về true, ngược lại false
+       */
+      if (!argv.pull) return false;
+      if (!argv.eUrl) {
+        console.error(`Missing --eUrl=<url>. This is required for --pull.`);
+        logSyncStatus("pull", { status: "failed", file: "-", varCount: 0, message: "missing --eUrl" });
+        return true; // đã "xử lý" case pull nhưng lỗi => vẫn kết thúc luồng
+      }
+      let envPath = "";
+      if (argv.e) {
+        envPath = typeof argv.e === "string" ? argv.e : argv.e[0];
+      }
+      envPath = `${envPath || ""}`.trim();
+      if (!envPath) {
+        logSyncStatus("pull", { status: "failed", file: "-", varCount: 0, message: "missing -e <path>" });
         return true;
       }
-      varNames.push(...explicitRawVars);
-    } else {
-      const inlineRawVars = inlineBindings.assignedRawVars || [];
-      for (let i = 0; i < outPaths.length; i++) {
-        const v = i < inlineRawVars.length ? inlineRawVars[i] : varPool[varCursor++] || "";
-        varNames.push(v.trim());
+      if (!fs.existsSync(envPath)) {
+        try {
+          const absPath = path.resolve(envPath);
+          fs.mkdirSync(path.dirname(absPath), { recursive: true });
+          fs.writeFileSync(absPath, "", "utf8");
+        } catch (err) {
+          logSyncStatus("pull", {
+            status: "failed",
+            file: envPath,
+            varCount: 0,
+            message: formatErrorMessage("pull create env file failed", err),
+          });
+          process.exit(1);
+        }
       }
-    }
 
-    if (varNames.some((v) => !v)) {
-      console.error(`Missing --var=<name>. This is required for --writefileraw (one var per output path).`);
-      return true;
-    }
-
-    const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
-    if (!ok) return true;
-
-    for (let i = 0; i < outPaths.length; i++) {
-      const outPath = outPaths[i];
-      const varName = varNames[i];
-
-      const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
-      if (!envVar.ok) process.exit(1);
+      const objVar = {
+        ...rtdbUtils.getDefaultRtdbEnv(),
+        ...(await rtdbUtils.pullFrom()),
+      };
+      const pullVarCount = Object.keys(objVar || {}).length;
 
       try {
-        ensureParentDirExists(outPath);
-        fs.writeFileSync(outPath, envVar.value, "utf8");
+        const out = rtdbUtils.serializeEnv(objVar);
+        fs.writeFileSync(envPath, out, "utf8");
+        logSyncStatus("pull", { status: "success", file: envPath, varCount: pullVarCount });
       } catch (err) {
-        console.error(`[writefileraw] write error: ${err && err.message ? err.message : err}`);
+        console.error(`[pull] write error: ${err && err.message ? err.message : err}`);
+        logSyncStatus("pull", { status: "failed", file: envPath, varCount: pullVarCount, message: "write file failed" });
         process.exit(1);
       }
-    }
-    return true;
-  };
-
-  const executeWriteFileBase64 = async () => {
-    /**
-     * Nếu tồn tại argv.writefilebase64 thì đọc --var từ -e <path>, decode base64 và ghi ra file.
-     */
-    if (!argv.writefilebase64) return false;
-
-    const outPaths = (Array.isArray(argv.writefilebase64) ? argv.writefilebase64 : [argv.writefilebase64])
-      .map((v) => (typeof v === "string" ? v.trim() : ""))
-      .filter(Boolean);
-    if (outPaths.length === 0) {
-      console.error(`Missing --writefilebase64=<path>.`);
       return true;
-    }
+    };
 
-    const explicitB64Vars = (Array.isArray(argv.varbase64 || argv.varBase64) ? argv.varbase64 || argv.varBase64 : [argv.varbase64 || argv.varBase64])
-      .map((v) => (typeof v === "string" ? v.trim() : ""))
-      .filter(Boolean);
+    const executeWriteFileRaw = async () => {
+      /**
+       * Nếu tồn tại argv.writefileraw thì đọc --var từ -e <path> và ghi thẳng ra file.
+       */
+      if (!argv.writefileraw) return false;
 
-    const varNames = [];
-    if (explicitB64Vars.length > 0) {
-      if (explicitB64Vars.length !== outPaths.length) {
-        console.error(`--varbase64 must have the same number of entries as --writefilebase64.`);
+      const outPaths = (Array.isArray(argv.writefileraw) ? argv.writefileraw : [argv.writefileraw])
+        .map((v) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean);
+      if (outPaths.length === 0) {
+        console.error(`Missing --writefileraw=<path>.`);
         return true;
       }
-      varNames.push(...explicitB64Vars);
-    } else {
-      const inlineBase64Vars = inlineBindings.assignedBase64Vars || [];
+
+      const explicitRawVars = (Array.isArray(argv.varraw || argv.varRaw) ? argv.varraw || argv.varRaw : [argv.varraw || argv.varRaw])
+        .map((v) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean);
+
+      const varNames = [];
+      if (explicitRawVars.length > 0) {
+        if (explicitRawVars.length !== outPaths.length) {
+          console.error(`--varraw must have the same number of entries as --writefileraw.`);
+          return true;
+        }
+        varNames.push(...explicitRawVars);
+      } else {
+        const inlineRawVars = inlineBindings.assignedRawVars || [];
+        for (let i = 0; i < outPaths.length; i++) {
+          const v = i < inlineRawVars.length ? inlineRawVars[i] : varPool[varCursor++] || "";
+          varNames.push(v.trim());
+        }
+      }
+
+      if (varNames.some((v) => !v)) {
+        console.error(`Missing --var=<name>. This is required for --writefileraw (one var per output path).`);
+        return true;
+      }
+
+      const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
+      if (!ok) return true;
+
       for (let i = 0; i < outPaths.length; i++) {
-        const v = i < inlineBase64Vars.length ? inlineBase64Vars[i] : varPool[varCursor++] || "";
-        varNames.push(v.trim());
-      }
-    }
+        const outPath = outPaths[i];
+        const varName = varNames[i];
 
-    if (varNames.some((v) => !v)) {
-      console.error(`Missing --var=<name>. This is required for --writefilebase64 (one var per output path).`);
+        const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
+        if (!envVar.ok) process.exit(1);
+
+        try {
+          ensureParentDirExists(outPath);
+          fs.writeFileSync(outPath, envVar.value, "utf8");
+        } catch (err) {
+          console.error(`[writefileraw] write error: ${err && err.message ? err.message : err}`);
+          process.exit(1);
+        }
+      }
       return true;
-    }
+    };
 
-    const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
-    if (!ok) return true;
+    const executeWriteFileBase64 = async () => {
+      /**
+       * Nếu tồn tại argv.writefilebase64 thì đọc --var từ -e <path>, decode base64 và ghi ra file.
+       */
+      if (!argv.writefilebase64) return false;
 
-    for (let i = 0; i < outPaths.length; i++) {
-      const outPath = outPaths[i];
-      const varName = varNames[i];
-
-      const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
-      if (!envVar.ok) process.exit(1);
-
-      const decoded = rtdbUtils.decodeBase64ToBuffer(envVar.value);
-      if (!decoded.ok) {
-        console.error(`[writefilebase64] Invalid base64 content in variable: ${varName}`);
-        process.exit(1);
+      const outPaths = (Array.isArray(argv.writefilebase64) ? argv.writefilebase64 : [argv.writefilebase64])
+        .map((v) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean);
+      if (outPaths.length === 0) {
+        console.error(`Missing --writefilebase64=<path>.`);
+        return true;
       }
 
-      try {
-        ensureParentDirExists(outPath);
-        fs.writeFileSync(outPath, decoded.buffer);
-      } catch (err) {
-        console.error(`[writefilebase64] write error: ${err && err.message ? err.message : err}`);
-        process.exit(1);
+      const explicitB64Vars = (
+        Array.isArray(argv.varbase64 || argv.varBase64) ? argv.varbase64 || argv.varBase64 : [argv.varbase64 || argv.varBase64]
+      )
+        .map((v) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean);
+
+      const varNames = [];
+      if (explicitB64Vars.length > 0) {
+        if (explicitB64Vars.length !== outPaths.length) {
+          console.error(`--varbase64 must have the same number of entries as --writefilebase64.`);
+          return true;
+        }
+        varNames.push(...explicitB64Vars);
+      } else {
+        const inlineBase64Vars = inlineBindings.assignedBase64Vars || [];
+        for (let i = 0; i < outPaths.length; i++) {
+          const v = i < inlineBase64Vars.length ? inlineBase64Vars[i] : varPool[varCursor++] || "";
+          varNames.push(v.trim());
+        }
       }
-    }
-    return true;
-  };
+
+      if (varNames.some((v) => !v)) {
+        console.error(`Missing --var=<name>. This is required for --writefilebase64 (one var per output path).`);
+        return true;
+      }
+
+      const { ok, envPath } = rtdbUtils.ensureEnvPathProvidedAndExists();
+      if (!ok) return true;
+
+      for (let i = 0; i < outPaths.length; i++) {
+        const outPath = outPaths[i];
+        const varName = varNames[i];
+
+        const envVar = rtdbUtils.readEnvVarFromPath(envPath, varName);
+        if (!envVar.ok) process.exit(1);
+
+        const decoded = rtdbUtils.decodeBase64ToBuffer(envVar.value);
+        if (!decoded.ok) {
+          console.error(`[writefilebase64] Invalid base64 content in variable: ${varName}`);
+          process.exit(1);
+        }
+
+        try {
+          ensureParentDirExists(outPath);
+          fs.writeFileSync(outPath, decoded.buffer);
+        } catch (err) {
+          console.error(`[writefilebase64] write error: ${err && err.message ? err.message : err}`);
+          process.exit(1);
+        }
+      }
+      return true;
+    };
 
     const inlineBindings = collectWriteVarBindings(rawArgv);
     const varPool = inlineBindings.fallbackVars;
@@ -774,35 +778,35 @@ async function main() {
       }
     }
 
-  const parseUrlToArgV = async () => {
-    /**
-     * Dùng rtdbUtils để đưa các var từ --eUrl vào variables.
-     *    - Phải kiểm tra nếu có truyền --eUrl vào thì mới thực hiện tiếp chỗ này, không có thì không thực thi, kiểm tra bằng cách
-     * có giá trị argv.eUrl thì truyền giá trị url này vào  rtdbUtils bằng hàm set để xử lý.
-     *    - Nếu có các key, value từ url, thì đưa vào variables
-     */
-    if (!argv.eUrl) return;
-    // url đã được set phía trên, nhưng vẫn giữ đúng tinh thần comment
-    rtdbUtils.setUrl(argv.eUrl);
+    const parseUrlToArgV = async () => {
+      /**
+       * Dùng rtdbUtils để đưa các var từ --eUrl vào variables.
+       *    - Phải kiểm tra nếu có truyền --eUrl vào thì mới thực hiện tiếp chỗ này, không có thì không thực thi, kiểm tra bằng cách
+       * có giá trị argv.eUrl thì truyền giá trị url này vào  rtdbUtils bằng hàm set để xử lý.
+       *    - Nếu có các key, value từ url, thì đưa vào variables
+       */
+      if (!argv.eUrl) return;
+      // url đã được set phía trên, nhưng vẫn giữ đúng tinh thần comment
+      rtdbUtils.setUrl(argv.eUrl);
 
-    const objVar = await rtdbUtils.pullFrom();
-    if (!objVar || typeof objVar !== "object") return;
+      const objVar = await rtdbUtils.pullFrom();
+      if (!objVar || typeof objVar !== "object") return;
 
-    for (const [k, v] of Object.entries(objVar)) {
-      if (!k) continue;
-      let val;
-      if (v == null) val = "";
-      else if (typeof v === "string") val = v;
-      else if (typeof v === "number" || typeof v === "boolean") val = String(v);
-      else val = JSON.stringify(v);
+      for (const [k, v] of Object.entries(objVar)) {
+        if (!k) continue;
+        let val;
+        if (v == null) val = "";
+        else if (typeof v === "string") val = v;
+        else if (typeof v === "number" || typeof v === "boolean") val = String(v);
+        else val = JSON.stringify(v);
 
-      variables.push([k, val]);
-    }
-  };
+        variables.push([k, val]);
+      }
+    };
 
     await parseUrlToArgV();
 
-  // Merge default env với variables (variables sẽ override default)
+    // Merge default env với variables (variables sẽ override default)
     const defaultEnv = rtdbUtils.getDefaultRtdbEnv() || {};
     const parsedVariables = {
       ...defaultEnv,
@@ -824,11 +828,11 @@ async function main() {
       }
     });
 
-  // Merge -v flags & eUrl vars vào process.env TRƯỚC khi expand,
-  // để các giá trị chứa ${VAR} từ -v / --eUrl cũng được resolve đúng.
+    // Merge -v flags & eUrl vars vào process.env TRƯỚC khi expand,
+    // để các giá trị chứa ${VAR} từ -v / --eUrl cũng được resolve đúng.
     Object.assign(process.env, parsedVariables);
 
-  // Expand when all path configs are loaded (bao gồm cả parsedVariables vừa merge)
+    // Expand when all path configs are loaded (bao gồm cả parsedVariables vừa merge)
     if (argv.expand !== false) {
       try {
         dotenvExpand({
@@ -849,23 +853,23 @@ async function main() {
       process.exit();
     }
 
-  // cross-env-shell style: allow `KEY=VALUE` at the beginning of the command section (after `--`)
-  function parseLeadingEnvAssignments(args = []) {
-    const env = {};
-    let i = 0;
-    for (; i < args.length; i++) {
-      const a = args[i];
-      if (typeof a !== "string") break;
-      const eq = a.indexOf("=");
-      if (eq <= 0) break;
-      const key = a.slice(0, eq);
-      const val = a.slice(eq + 1);
-      // Keep it strict-ish to avoid eating normal args like --foo=bar
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) break;
-      env[key] = val;
+    // cross-env-shell style: allow `KEY=VALUE` at the beginning of the command section (after `--`)
+    function parseLeadingEnvAssignments(args = []) {
+      const env = {};
+      let i = 0;
+      for (; i < args.length; i++) {
+        const a = args[i];
+        if (typeof a !== "string") break;
+        const eq = a.indexOf("=");
+        if (eq <= 0) break;
+        const key = a.slice(0, eq);
+        const val = a.slice(eq + 1);
+        // Keep it strict-ish to avoid eating normal args like --foo=bar
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) break;
+        env[key] = val;
+      }
+      return { env, rest: args.slice(i) };
     }
-    return { env, rest: args.slice(i) };
-  }
 
     const shellOptRaw = argv.shell;
     let shellOpt = shellOptRaw;
@@ -891,9 +895,9 @@ async function main() {
       env: childEnv,
     };
 
-  // If --shell is provided:
-  // - boolean true => use platform default shell
-  // - string => pass through to node spawn `shell` option (advanced)
+    // If --shell is provided:
+    // - boolean true => use platform default shell
+    // - string => pass through to node spawn `shell` option (advanced)
     let child;
     if (runInShell) {
       const shellCommand = cmdArgs.length === 1 ? cmdArgs[0] : cmdArgs.join(" ");
