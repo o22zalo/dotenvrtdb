@@ -46,36 +46,113 @@ const rtdbUtils = (() => {
 
   const setUrl = (url = "") => (rtdbUrl = url);
 
-  function parseEnvPlaceholder(value) {
-    if (typeof value !== "string") return null;
-    const s = value.trim();
+  function readEnvVarFromSource(source, envName) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) return undefined;
+    if (!Object.prototype.hasOwnProperty.call(source, envName)) return undefined;
+    const raw = source[envName];
+    if (raw == null) return "";
+    if (typeof raw === "string") return raw;
+    if (typeof raw === "number" || typeof raw === "boolean") return String(raw);
+    return JSON.stringify(raw);
+  }
 
-    let m = s.match(/^%([A-Za-z_][A-Za-z0-9_]*)%$/); // CMD: %VAR%
-    if (m) return m[1];
+  function readEnvVarFromSources(envName, sources = []) {
+    for (const source of sources) {
+      const value = readEnvVarFromSource(source, envName);
+      if (typeof value !== "undefined") return value;
+    }
+    return undefined;
+  }
 
-    m = s.match(/^\$env:([A-Za-z_][A-Za-z0-9_]*)$/i); // PS: $env:VAR
-    if (m) return m[1];
+  function expandEnvPlaceholders(rawValue = "", sources = [], options = {}) {
+    if (typeof rawValue !== "string") return rawValue;
+    const maxPasses = Number.isInteger(options.maxPasses) && options.maxPasses > 0 ? options.maxPasses : 12;
+    let output = rawValue;
 
-    m = s.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/); // bash: ${VAR}
-    if (m) return m[1];
+    for (let pass = 0; pass < maxPasses; pass++) {
+      let changed = false;
 
-    m = s.match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/); // bash: $VAR
-    if (m) return m[1];
+      output = output.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}/g, (match, envName, defaultMode, defaultValue = "") => {
+        const resolved = readEnvVarFromSources(envName, sources);
+        if (typeof resolved !== "undefined") {
+          if (resolved === "" && defaultMode === ":-") {
+            changed = true;
+            return defaultValue;
+          }
+          changed = true;
+          return resolved;
+        }
+        if (defaultMode === ":-" || defaultMode === "-") {
+          changed = true;
+          return defaultValue;
+        }
+        return match;
+      });
 
-    return null;
+      output = output.replace(/\$env:([A-Za-z_][A-Za-z0-9_]*)/gi, (match, envName) => {
+        const resolved = readEnvVarFromSources(envName, sources);
+        if (typeof resolved === "undefined") return match;
+        changed = true;
+        return resolved;
+      });
+
+      output = output.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (match, envName) => {
+        const resolved = readEnvVarFromSources(envName, sources);
+        if (typeof resolved === "undefined") return match;
+        changed = true;
+        return resolved;
+      });
+
+      output = output.replace(/(^|[^\\$])\$(?!env:)([A-Za-z_][A-Za-z0-9_]*)/g, (match, prefix, envName) => {
+        const resolved = readEnvVarFromSources(envName, sources);
+        if (typeof resolved === "undefined") return match;
+        changed = true;
+        return `${prefix}${resolved}`;
+      });
+
+      if (!changed) break;
+    }
+
+    return output;
+  }
+
+  function expandEnvObjectPlaceholders(objVar = {}, options = {}) {
+    if (!objVar || typeof objVar !== "object" || Array.isArray(objVar)) return objVar;
+
+    const fallbackEnv = options && options.fallbackEnv && typeof options.fallbackEnv === "object" ? options.fallbackEnv : {};
+    const maxPasses = Number.isInteger(options.maxPasses) && options.maxPasses > 0 ? options.maxPasses : 20;
+    const expanded = { ...objVar };
+
+    for (let pass = 0; pass < maxPasses; pass++) {
+      let changed = false;
+      const sources = [expanded, fallbackEnv];
+
+      for (const [key, value] of Object.entries(expanded)) {
+        if (typeof value !== "string") continue;
+        const next = expandEnvPlaceholders(value, sources, { maxPasses: 6 });
+        if (next === value) continue;
+        expanded[key] = next;
+        changed = true;
+      }
+
+      if (!changed) break;
+    }
+
+    return expanded;
   }
 
   function resolveRtdbUrlFromObjVar(rtdbUrl, objVar) {
-    const envName = parseEnvPlaceholder(rtdbUrl);
-    if (!envName) return rtdbUrl;
+    const inputUrl = typeof rtdbUrl === "string" ? rtdbUrl.trim() : "";
+    if (!inputUrl) return "";
 
-    if (!objVar || typeof objVar !== "object" || Array.isArray(objVar)) return rtdbUrl;
-    if (!Object.prototype.hasOwnProperty.call(objVar, envName)) return rtdbUrl;
+    const sources = [];
+    if (objVar && typeof objVar === "object" && !Array.isArray(objVar)) {
+      sources.push(objVar);
+    }
+    sources.push(process.env || {});
 
-    const resolved = objVar[envName];
-    if (typeof resolved !== "string" || resolved.trim() === "") return rtdbUrl;
-
-    return resolved.trim();
+    const expanded = expandEnvPlaceholders(inputUrl, sources, { maxPasses: 20 });
+    return typeof expanded === "string" ? expanded.trim() : inputUrl;
   }
 
   function parseFileValueDirective(value = "") {
@@ -170,7 +247,8 @@ const rtdbUtils = (() => {
       }
       const content = fs.readFileSync(p, "utf8");
       const parsed = dotenv.parse(content); // {KEY:VAL}
-      const resolvedVars = resolveEnvFileDirectives(parsed, { baseDir: path.dirname(path.resolve(p)) });
+      const expandedVars = argv.expand === false ? parsed : expandEnvObjectPlaceholders(parsed, { fallbackEnv: process.env });
+      const resolvedVars = resolveEnvFileDirectives(expandedVars, { baseDir: path.dirname(path.resolve(p)) });
       const varCount = Object.keys(resolvedVars || {}).length;
       const ok = await pushTo(resolvedVars);
       return { ok, file: p, varCount, reason: ok ? "" : "RTDB PATCH failed" };
@@ -183,10 +261,7 @@ const rtdbUtils = (() => {
   const pullFrom = async () => {
     // Lấy dữ liệu từ rtdbUrl, trả về objVar
     try {
-      let finalUrl = rtdbUrl;
-      if ((finalUrl + "").startsWith("http") !== true) {
-        finalUrl = resolveRtdbUrlFromObjVar(rtdbUrl, process.env);
-      }
+      const finalUrl = resolveRtdbUrlFromObjVar(rtdbUrl, process.env);
 
       if (!finalUrl) {
         console.error(`[rtdb] Missing url. Provide --eUrl=https://...`);
