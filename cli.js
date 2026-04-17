@@ -16,6 +16,7 @@ const path = require("path");
 const fs = require("fs");
 const { runRunnerSubcommand } = require("./src/commands/runner");
 const { runDockerSubcommand } = require("./src/commands/docker");
+const { collectRunnerInfo } = require("./src/utils/runner-info");
 
 function formatErrorMessage(context = "unknown", err) {
   if (!err) return `[${context}] Unknown error`;
@@ -630,7 +631,9 @@ async function main() {
 
     const executePull = async () => {
       /**
-       * Nếu tồn tại argv.pull, và có url thì thực hiện và trả về true, ngược lại false
+       * Nếu tồn tại argv.pull, và có url thì thực hiện và trả về true, ngược lại false.
+       * Sau khi pull từ remote, merge thêm runner info (_DOTENVRTDB_RUNNER_*) vào env file
+       * để có đầy đủ context về CI/CD runner đang thực thi lệnh này.
        */
       if (!argv.pull) return false;
       if (!argv.eUrl) {
@@ -663,9 +666,12 @@ async function main() {
         }
       }
 
+      // Runner info được merge SAU remote data để đảm bảo
+      // các giá trị factual (hostname, os, run_id) không bị remote ghi đè.
       const objVar = {
         ...rtdbUtils.getDefaultRtdbEnv(),
         ...(await rtdbUtils.pullFrom()),
+        ...collectRunnerInfo(),
       };
       const pullVarCount = Object.keys(objVar || {}).length;
 
