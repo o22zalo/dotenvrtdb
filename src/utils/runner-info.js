@@ -31,9 +31,7 @@ function runGit(args) {
 }
 
 function formatCommitAt(commitDateIso) {
-  const match = `${commitDateIso || ""}`.match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/,
-  );
+  const match = `${commitDateIso || ""}`.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
   if (!match) return "";
 
   const [, year, month, day, hour, minute] = match;
@@ -41,15 +39,12 @@ function formatCommitAt(commitDateIso) {
 }
 
 function collectGitCommitInfo() {
-  const commitId =
-    runGit(["log", "-1", "--format=%H"]) ||
-    process.env.GITHUB_SHA ||
-    process.env.BUILD_SOURCEVERSION ||
-    "";
+  const commitId = runGit(["log", "-1", "--format=%H"]) || process.env.GITHUB_SHA || process.env.BUILD_SOURCEVERSION || "";
   const commitAt = formatCommitAt(runGit(["log", "-1", "--format=%cI"]));
 
   return {
     [`${PREFIX}COMMIT_ID`]: commitId,
+    [`${PREFIX}COMMIT_SHORT_ID`]: commitId.slice(0, 7),
     [`${PREFIX}COMMIT_AT`]: commitAt,
   };
 }
